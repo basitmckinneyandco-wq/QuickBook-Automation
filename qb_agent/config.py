@@ -101,7 +101,10 @@ def load_config(filename: str | Path) -> AppConfig:
         raise FileNotFoundError(
             f"{path} was not found. Copy config.example.json to config.json first."
         )
-    raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    # utf-8-sig, not utf-8: Notepad and PowerShell both like to put a byte-order
+    # mark at the start of a file they save, and plain utf-8 chokes on it. This
+    # reads the file with or without one.
+    raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8-sig"))
     mode = str(raw.get("mode", "dry_run"))
     if mode not in VALID_MODES:
         raise ValueError("mode must be 'dry_run' or 'quickbooks'")
@@ -141,7 +144,7 @@ def save_company(config: AppConfig, company_file: str, display_name: str, databa
     accounts and the sheet link are left exactly as they were.
     """
     path = Path(config.source_path)
-    raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8-sig"))
     raw.setdefault("company", {})
     raw["company"]["file_path"] = company_file
     raw["company"]["display_name"] = display_name
@@ -161,7 +164,7 @@ def save_data_source(config: AppConfig, url: str) -> None:
     QuickBooks, is left alone.
     """
     path = Path(config.source_path)
-    raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8-sig"))
     raw.setdefault("data_source", {})
     raw["data_source"]["url"] = url
     path.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

@@ -1,0 +1,134 @@
+===============================================================
+  QuickBooks Automation Dashboard  -  first-time setup
+===============================================================
+
+You do this ONCE. After that it is one double-click, every day.
+
+
+---------------------------------------------------------------
+STEP 1   Install Python
+---------------------------------------------------------------
+
+Click the Start button, type   powershell   and open it.
+Copy this line in, press Enter, and wait for it to finish:
+
+    winget install Python.Python.3.13
+
+Then CLOSE PowerShell and open it again. (It has to notice the
+new Python.)
+
+
+---------------------------------------------------------------
+STEP 2   Install the one thing it needs
+---------------------------------------------------------------
+
+In PowerShell, copy in these two lines, one at a time.
+Change the folder path if you unzipped somewhere else:
+
+    cd "C:\QuickBooks Automation"
+
+    pip install -r requirements.txt
+
+You do NOT need to download anything from Intuit. QuickBooks
+already installs the part that lets this app talk to it.
+
+
+---------------------------------------------------------------
+STEP 3   Put an icon on your Desktop
+---------------------------------------------------------------
+
+In this folder, double-click:
+
+    Create Desktop Shortcut.cmd
+
+An icon called "QuickBooks Dashboard" appears on your Desktop.
+That is what you use from now on.
+
+
+---------------------------------------------------------------
+STEP 4   Start it
+---------------------------------------------------------------
+
+1.  Open your company in QuickBooks Desktop first.
+
+2.  Double-click the "QuickBooks Dashboard" icon.
+    A black window opens and your browser opens the dashboard.
+
+    LEAVE THE BLACK WINDOW OPEN. That window IS the app.
+    Closing it stops everything.
+
+3.  Watch QuickBooks. A blue box appears asking for permission.
+    Choose:
+
+        "Yes, whenever my QuickBooks company file is open"
+
+    then click Continue.
+
+    IMPORTANT: if you close that box instead of answering it,
+    QuickBooks remembers it as a REFUSAL and nothing will work
+    afterwards. To undo that: in QuickBooks go to
+    Edit > Preferences > Integrated Applications >
+    Company Preferences, select "QB Automation Dashboard",
+    click Remove, then start the dashboard again.
+
+
+---------------------------------------------------------------
+STEP 5   Point it at your company
+---------------------------------------------------------------
+
+In the dashboard, click  Status  on the left.
+
+Under "Company file", pick your company from the list - it will
+say "open in QuickBooks" next to it - and press
+"Switch to this company".
+
+If your company is not in the list, press Rescan.
+
+
+---------------------------------------------------------------
+STEP 6   Check before you send anything
+---------------------------------------------------------------
+
+Still on the Status page, press "Run check".
+
+This looks inside YOUR company file for every account, template
+and item the invoices need, and tells you which are missing.
+A company that has not been set up yet will fail most of them.
+
+Do not send invoices until this is all green.
+
+
+===============================================================
+  EVERY DAY AFTER THAT
+===============================================================
+
+1.  Open your company in QuickBooks.
+2.  Double-click the "QuickBooks Dashboard" icon on your Desktop.
+
+That is all.
+
+
+===============================================================
+  TWO THINGS THAT CAUSE MOST PROBLEMS
+===============================================================
+
+CLOSE THE CUSTOMER CENTRE in QuickBooks before you send.
+That window holds the customer list open, and writing to it
+underneath can crash QuickBooks in the middle of a batch.
+
+DO NOT CLICK INSIDE THE BLACK WINDOW.
+Windows freezes it when you click in it. If the dashboard seems
+stuck, click that window and press the Esc key.
+
+
+===============================================================
+  IF SOMETHING GOES WRONG
+===============================================================
+
+Two pages answer nearly everything:
+
+  Status   - can I send? What is connected, what is missing.
+  History  - what happened when I did? Every action, and the
+             exact error, which you can copy and send on.
+
+More detail is in SETUP.md in this folder.
