@@ -130,13 +130,13 @@ def _doctor() -> int:
     line("QuickBooks connector registered", "yes" if sdk_registered() else "NO  -> is QuickBooks Desktop installed?")
 
     titles = quickbooks_windows()
+    main_window = next((t for t in titles if "- Intuit QuickBooks" in t), "")
     if not titles:
         line("QuickBooks windows visible", "NONE")
         print("\n  QuickBooks does not appear to be running for this Windows user.")
         print("  If it IS on screen, it was started by a different user or with")
         print("  'Run as administrator' - and then this app cannot see it.\n")
     else:
-        main_window = next((t for t in titles if "- Intuit QuickBooks" in t), "")
         line("QuickBooks windows visible", len(titles))
         line("Company on the title bar", main_window.split("- Intuit QuickBooks")[0].strip() or "(none)")
         if any("No Company Open" in t for t in titles):
@@ -147,18 +147,24 @@ def _doctor() -> int:
 
     print()
     try:
-        line("Session test", "OK")
-        line("Company file", current_company_file())
-        print("\n  QuickBooks can be reached. The app is ready to use.\n")
-        return 0
+        opened = current_company_file()            # test first, then report
     except QuickBooksError as exc:
-        print(f"  Session test                       FAILED\n")
-        print(f"  {exc}\n")
-        if titles and not elevated:
-            print("  QuickBooks windows were found, so it is running. The usual cause")
-            print("  left is elevation: if QuickBooks itself was started with 'Run as")
-            print("  administrator', close it and start it normally.\n")
+        line("Session test", "FAILED")
+        print(f"\n  {exc}\n")
+        if elevated:
+            print("  >>> This window is running as administrator, and QuickBooks")
+            print("      almost certainly is not. That alone is enough to hide")
+            print("      QuickBooks from this app.")
+            print("      Close this window. Open PowerShell normally - do NOT")
+            print("      right-click 'Run as administrator' - and try again.\n")
+        elif not main_window:
+            print("  >>> No QuickBooks company window was found. Open QuickBooks")
+            print("      Desktop and open the company, then try again.\n")
         return 1
+    line("Session test", "OK")
+    line("Company file", opened)
+    print("\n  QuickBooks can be reached. The app is ready to use.\n")
+    return 0
 
 
 if __name__ == "__main__":
