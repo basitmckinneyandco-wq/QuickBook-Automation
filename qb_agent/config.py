@@ -145,7 +145,12 @@ def save_company(config: AppConfig, company_file: str, display_name: str, databa
     raw.setdefault("company", {})
     raw["company"]["file_path"] = company_file
     raw["company"]["display_name"] = display_name
-    raw["database_path"] = database
+    # Written as a bare file name whenever it sits beside the settings file, so
+    # copying the folder to another machine does not leave it pointing at a
+    # drive that only existed on this one. load_config resolves it back.
+    beside = Path(path).resolve().parent
+    kept = Path(database)
+    raw["database_path"] = kept.name if kept.parent == beside else str(kept)
     path.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 

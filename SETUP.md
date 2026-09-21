@@ -38,13 +38,18 @@ documentation, sample code and developer tools. The app never uses it. Skip it.
 
 Put the project folder anywhere, for example `D:\AI\code\qb-automation`.
 
-**Two things must NOT be copied from another machine:**
+**Delete these before you start, if the folder you were sent still has them:**
 
-- **`qb_automation.db`** — this is the app's memory of what it has already
-  created. Copy someone else's and the app will believe your invoices already
-  exist and silently skip them. Delete it; a fresh one is made on first run.
-- **`config.json`** — it holds the other machine's company-file path. Start
-  from `config.example.json` instead (step 4).
+- **Every `.db` file** (`qb_automation.db`, `Testing LLC.db`, and any other) —
+  these are the app's memory of what it has already created. Keep someone
+  else's and the app will believe your invoices already exist and silently skip
+  them. Fresh ones are made on first run.
+- **`dist\`, `build\`** — leftover build output. Not needed to run.
+
+`config.json` **can** be copied: it carries the Google Sheet link, which saves
+setting it up again. The company file path in it will be wrong for this machine,
+but that is fixed on the Status page in a couple of clicks (step 5) — no file
+editing.
 
 ---
 
@@ -64,22 +69,12 @@ else the app uses comes with Python.
 
 ## 4. Set up config.json
 
-Copy `config.example.json` to `config.json`, open it in Notepad and fill in
-three things.
+**If you were sent a `config.json`, skip this step** — the company and the sheet
+link are both set from the dashboard in step 5.
 
-**a. The company file path.** Open your company in QuickBooks, then run:
-
-```powershell
-python -m qb_agent whoami
-```
-
-It prints the exact path. Paste it into `company.file_path` — and **double each
-backslash**, so `C:\Users\...` becomes `C:\\Users\\...`.
-
-**b. The Google Sheet link** goes in `data_source.url`.
-
-**c. Leave `mode` as `dry_run` for now.** In dry-run the app does everything
-except actually write to QuickBooks, which is the safe way to check your setup.
+Otherwise copy `config.example.json` to `config.json`. Leave everything as it
+is: `mode` stays `dry_run` to begin with, which means the app does everything
+except actually write to QuickBooks. That is the safe way to check your setup.
 
 ---
 
@@ -97,6 +92,25 @@ This only happens once per company file. If you miss it, look for a flashing
 QuickBooks window in the taskbar — the app will just sit waiting until you answer.
 
 **Leave the PowerShell window open** — that is the app running. `Ctrl+C` stops it.
+
+### Point it at your company and your sheet
+
+Both are done on the **Status** page. No file editing.
+
+**The company.** Open your company in QuickBooks Desktop first. Then under
+**Company file**, pick it from the dropdown — the one tagged *open in
+QuickBooks* — and press **Switch to this company**. If it is not listed, press
+**Rescan**.
+
+QuickBooks only ever serves the one company it has open, so that is the only one
+you can switch to while it is running. The warning above the dropdown tells you
+when the app is aimed at a different company from the one QuickBooks has open —
+nothing can be sent until those two agree.
+
+**The sheet.** Under **Where the policies come from**, press **Unlock to edit**,
+paste the published link, and press **Test and save**. The link is tried before
+it is kept, so a wrong one is refused with the reason and the old one stays. The
+box locks itself again afterwards.
 
 > **Windows gotcha:** don't click inside that PowerShell window. Clicking puts
 > the console into selection mode and freezes whatever is printing to it. If
@@ -171,6 +185,8 @@ Common ones:
 |---|---|
 | "Could not start QuickBooks" | QuickBooks has a *different* company open. Switch it in QuickBooks: File → Open Previous Company. |
 | "A modal dialog box is showing" | A popup is open in QuickBooks. Close it. |
+| "in use by another user", or QuickBooks crashes mid-batch | **The Customer Centre is open in QuickBooks.** It holds the customer list open, and writing to that list underneath it can take QuickBooks down. Close that window before sending. The dashboard warns you when you press Send, but close it anyway as a habit. |
+| "Nothing can be sent right now" on the Status page | QuickBooks has a different company open from the one the app is aimed at. Switch one of them so they match. |
 | "invalid reference to QuickBooks Item / template" | A name was changed in QuickBooks. Run the Status check — it names which. |
 | Nothing loads, "Not connected" | The PowerShell window was closed, or is frozen in selection mode (press `Esc`). |
 
@@ -194,10 +210,12 @@ QuickBooks Automation\
 
 1. Put the folder anywhere, e.g. `C:\QuickBooks Automation`.
 2. Open your company in QuickBooks Desktop.
-3. Copy `config.example.json` to `config.json`, open it in Notepad, and fill in
-   `company.file_path` and `data_source.url` (see step 4 above for how).
+3. If there is no `config.json`, copy `config.example.json` to `config.json`.
+   Nothing to edit.
 4. Double-click **Start Dashboard.cmd**. A black window opens and your browser
    goes to the dashboard.
+5. On the **Status** page, pick your company and paste the sheet link — see
+   *Point it at your company and your sheet* in step 5 above.
 
 **You must be watching QuickBooks the first time.** QuickBooks will pop up a
 permission window asking whether to let "QB Automation Dashboard" read and
