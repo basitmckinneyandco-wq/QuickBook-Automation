@@ -219,7 +219,20 @@ def serve(
     *,
     open_browser: bool = False,
 ) -> None:
-    server = DashboardServer((host, port), runtime, static_dir)
+    try:
+        server = DashboardServer((host, port), runtime, static_dir)
+    except OSError as exc:
+        # Almost always a second copy being started while the first still runs,
+        # which Windows reports as WinError 10048 under a wall of traceback.
+        if getattr(exc, "winerror", 0) == 10048 or exc.errno in (48, 98):
+            print(
+                f"\n  The dashboard is already running.\n"
+                f"  Open it here:  http://{host}:{port}\n\n"
+                f"  If you meant to restart it, close the other window first -\n"
+                f"  the one with 'Press Ctrl+C to stop' in it.\n"
+            )
+            raise SystemExit(1) from None
+        raise
     runtime.start_prefetch()  # begin downloading the sheet while the page loads
     runtime.start_watching()  # then keep re-reading it, so new rows turn up on their own
     url = f"http://{host}:{port}"

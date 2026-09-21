@@ -84,7 +84,8 @@ def _whoami() -> int:
         return 1
     print("QuickBooks currently has this company file open:\n")
     print(f"  {path}\n")
-    print('Copy it into config.json as company.file_path (use \\\\ for each backslash).')
+    print("To work in it, open the dashboard's Status page, pick it under")
+    print("Company file and press Switch to this company. Nothing to edit by hand.")
     return 0
 
 
