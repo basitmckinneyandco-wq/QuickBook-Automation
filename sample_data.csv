@@ -1,0 +1,8 @@
+Customer Name,Company Name,Email,Phone,Invoice Number,Invoice Date,Item,Description,Quantity,Rate,Amount
+Acme Roofing,Acme Roofing LLC,billing@acmeroofing.test,555-0101,INV-1001,09/01/2026,Services,Monthly bookkeeping - August,1,450.00,
+Bluebird Cafe,Bluebird Cafe Inc,owner@bluebirdcafe.test,555-0102,INV-1002,09/02/2026,Services,Payroll processing,2,125.00,
+Cedar Design Studio,Cedar Design Studio,hello@cedardesign.test,555-0103,INV-1003,09/03/2026,Services,Quarterly tax filing,1,,900.00
+Acme Roofing,Acme Roofing LLC,billing@acmeroofing.test,555-0101,INV-1004,09/05/2026,Services,Monthly bookkeeping - September,1,450.00,
+Dockside Marine Supply,Dockside Marine Supply Co,accounts@dockside.test,555-0104,,,,,,,
+Evergreen Landscaping,Evergreen Landscaping,,555-0105,INV-1006,not a date,Services,Site visit,1,200.00,
+,Missing Customer Row LLC,nobody@example.test,555-0106,INV-1007,09/08/2026,Services,This row has no customer name,1,75.00,

@@ -1,0 +1,24 @@
+# Real settings: holds the published-sheet link and the company file path.
+# config.example.json is the one that ships.
+config.json
+config-*.json
+
+# Every history database - these hold real customer and policy records.
+*.db
+
+# The spreadsheet the live data is shaped from.
+*.xlsx
+
+# A separate, earlier project that happens to sit in this folder.
+Accounting Automation/
+
+# Build output.
+build/
+dist/
+*.zip
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store

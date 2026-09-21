@@ -1,0 +1,4 @@
+# The only third-party package this app needs. Everything else is in Python
+# itself. pywin32 is what lets Python talk to QuickBooks Desktop over COM, so
+# it is Windows-only - the app cannot run on Mac or Linux.
+pywin32>=306
