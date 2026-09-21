@@ -44,12 +44,15 @@ def main(argv: list[str] | None = None) -> int:
 
     subparsers.add_parser("whoami", help="Print the company file QuickBooks has open right now.")
     subparsers.add_parser("check", help="Print the current settings and safety state.")
+    subparsers.add_parser("doctor", help="Diagnose why QuickBooks cannot be reached.")
 
     args = parser.parse_args(argv)
     command = args.command or "serve"
 
     if command == "whoami":
         return _whoami()
+    if command == "doctor":
+        return _doctor()
 
     try:
         config = load_config(args.config)
@@ -87,6 +90,75 @@ def _whoami() -> int:
     print("To work in it, open the dashboard's Status page, pick it under")
     print("Company file and press Switch to this company. Nothing to edit by hand.")
     return 0
+
+
+def _doctor() -> int:
+    """Report the things that actually stop QuickBooks being reached.
+
+    "The company is open, so why does it say it isn't?" has a small number of
+    causes, and none of them are visible from the error alone: a mismatch in
+    elevation, QuickBooks running as a different Windows user, or the connector
+    not being installed. This prints the facts for all of them.
+    """
+    import ctypes
+    import getpass
+    import platform
+
+    from .quickbooks import QuickBooksError, current_company_file, quickbooks_windows, sdk_registered
+
+    def line(label: str, value: object) -> None:
+        print(f"  {label:<34} {value}")
+
+    print("\n  QuickBooks connection report")
+    print("  " + "-" * 54)
+
+    bits = "64-bit" if sys.maxsize > 2**32 else "32-bit"
+    line("Python", f"{platform.python_version()} ({bits})")
+    line("Windows user running this", getpass.getuser())
+    try:
+        elevated = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        elevated = False
+    line("Running as administrator", "YES" if elevated else "no")
+
+    try:
+        import win32com.client  # noqa: F401
+        line("pywin32 installed", "yes")
+    except ImportError:
+        line("pywin32 installed", "NO  -> run: pip install -r requirements.txt")
+
+    line("QuickBooks connector registered", "yes" if sdk_registered() else "NO  -> is QuickBooks Desktop installed?")
+
+    titles = quickbooks_windows()
+    if not titles:
+        line("QuickBooks windows visible", "NONE")
+        print("\n  QuickBooks does not appear to be running for this Windows user.")
+        print("  If it IS on screen, it was started by a different user or with")
+        print("  'Run as administrator' - and then this app cannot see it.\n")
+    else:
+        main_window = next((t for t in titles if "- Intuit QuickBooks" in t), "")
+        line("QuickBooks windows visible", len(titles))
+        line("Company on the title bar", main_window.split("- Intuit QuickBooks")[0].strip() or "(none)")
+        if any("No Company Open" in t for t in titles):
+            line("WARNING", "the 'No Company Open' window is showing")
+        centre = next((t for t in titles if t.startswith(("Customer Cent",))), "")
+        if centre:
+            line("WARNING", "the Customer Centre is open - close it before sending")
+
+    print()
+    try:
+        line("Session test", "OK")
+        line("Company file", current_company_file())
+        print("\n  QuickBooks can be reached. The app is ready to use.\n")
+        return 0
+    except QuickBooksError as exc:
+        print(f"  Session test                       FAILED\n")
+        print(f"  {exc}\n")
+        if titles and not elevated:
+            print("  QuickBooks windows were found, so it is running. The usual cause")
+            print("  left is elevation: if QuickBooks itself was started with 'Run as")
+            print("  administrator', close it and start it normally.\n")
+        return 1
 
 
 if __name__ == "__main__":

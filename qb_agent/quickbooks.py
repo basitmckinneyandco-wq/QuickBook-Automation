@@ -116,10 +116,44 @@ class RequestProcessorTransport(AbstractContextManager["RequestProcessorTranspor
             self.__exit__(None, None, None)
             if isinstance(exc, QuickBooksError):
                 raise
-            raise QuickBooksError(
-                "Could not open the QuickBooks Desktop SDK session. Check that QuickBooks "
-                f"is running with a company file open, then approve the access request. ({exc})"
-            ) from exc
+            raise QuickBooksError(self._explain(exc)) from exc
+
+    @staticmethod
+    def _explain(exc: Exception) -> str:
+        """Turn the SDK's COM error into something worth reading.
+
+        The raw text is a nested tuple of HRESULTs quoting QuickBooks at the
+        developer, not at whoever is sitting in front of it.
+        """
+        raw = str(exc)
+        if "must include the name of the data file" in raw:
+            return (
+                "QuickBooks does not have a company file open. Start QuickBooks "
+                "Desktop and open your company (File, Open Previous Company), "
+                "then try again. If QuickBooks is already showing your company, "
+                "check that it and this app were started by the same Windows "
+                "user - running one of them as administrator and not the other "
+                "hides the session from the app."
+            )
+        if "denied access" in raw or "not allowed" in raw.lower():
+            return (
+                "QuickBooks has this app on its refused list. In QuickBooks go to "
+                "Edit, Preferences, Integrated Applications, Company Preferences, "
+                "select 'QB Automation Dashboard' and press Remove. Then start the "
+                "dashboard again and answer the permission box with 'Yes, whenever "
+                "my QuickBooks company file is open'."
+            )
+        if "Class not registered" in raw or "Invalid class string" in raw:
+            return (
+                "The QuickBooks connector was not found on this computer. It is "
+                "installed by QuickBooks Desktop itself, so this usually means "
+                "QuickBooks Desktop is not installed here. (The Intuit SDK "
+                "download is not what is needed - only QuickBooks itself.)"
+            )
+        return (
+            "Could not open the QuickBooks Desktop SDK session. Check that QuickBooks "
+            f"is running with a company file open, then approve the access request. ({exc})"
+        )
 
     def _begin_session(self):
         """Attach to the company file QuickBooks already has open.
