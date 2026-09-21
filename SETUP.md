@@ -184,6 +184,7 @@ Common ones:
 | Symptom | Cause |
 |---|---|
 | "Could not start QuickBooks" | QuickBooks has a *different* company open. Switch it in QuickBooks: File → Open Previous Company. |
+| "QuickBooks does not have a company file open" — **but it is open** | The PowerShell window was started with **Run as administrator** and QuickBooks was not. Windows keeps an elevated program separate from ordinary ones, so the app cannot see QuickBooks at all. Close that window, open PowerShell normally, and start again. Never run either one as administrator. |
 | "A modal dialog box is showing" | A popup is open in QuickBooks. Close it. |
 | "in use by another user", or QuickBooks crashes mid-batch | **The Customer Centre is open in QuickBooks.** It holds the customer list open, and writing to that list underneath it can take QuickBooks down. Close that window before sending. The dashboard warns you when you press Send, but close it anyway as a habit. |
 | "Nothing can be sent right now" on the Status page | QuickBooks has a different company open from the one the app is aimed at. Switch one of them so they match. |

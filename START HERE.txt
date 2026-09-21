@@ -116,6 +116,13 @@ CLOSE THE CUSTOMER CENTRE in QuickBooks before you send.
 That window holds the customer list open, and writing to it
 underneath can crash QuickBooks in the middle of a batch.
 
+NEVER USE "RUN AS ADMINISTRATOR".
+Open PowerShell normally - click Start, type powershell, click it.
+If you run it as administrator but QuickBooks normally, Windows
+keeps them apart and the app cannot see QuickBooks at all. It
+then says "QuickBooks does not have a company file open" even
+though your company is clearly on screen.
+
 DO NOT CLICK INSIDE THE BLACK WINDOW.
 Windows freezes it when you click in it. If the dashboard seems
 stuck, click that window and press the Esc key.
