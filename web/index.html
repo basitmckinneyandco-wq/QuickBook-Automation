@@ -272,16 +272,24 @@
             <option value="completed">Created</option>
             <option value="failed">Failed</option>
           </select>
+          <select id="invoiceKindFilter" aria-label="Filter by kind of invoice">
+            <option value="all">Any invoice</option>
+            <option value="premium">Premium only</option>
+            <option value="commission">Commission only</option>
+            <option value="fees">Fees only</option>
+          </select>
           <select id="invoiceFilter" aria-label="Filter by invoice status">
             <option value="all">All invoices</option>
             <option value="ready">Pending</option>
             <option value="review">Needs review</option>
             <option value="completed">Created</option>
             <option value="failed">Failed</option>
+            <option value="not_needed">Not needed</option>
           </select>
           <span class="spacer"></span>
           <span class="selection-note" id="selectionNote"></span>
           <button class="btn ghost" id="refreshButton" type="button">Refresh policies</button>
+          <button class="btn ghost" id="bulkEditButton" type="button" disabled>Edit selected</button>
           <button class="btn primary" id="processButton" type="button" disabled>Send Customers/Jobs</button>
           <button class="btn primary" id="invoiceButton" type="button" disabled>Send Invoice</button>
         </div>
@@ -480,6 +488,34 @@
       <span class="spacer"></span>
       <button class="btn ghost" type="button" id="invoiceCancel">Cancel</button>
       <button class="btn primary" type="button" id="invoiceCreate">Create invoice</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="bulkDialog" aria-labelledby="bulkTitle">
+  <form method="dialog" id="bulkForm">
+    <header class="edit-head">
+      <div class="edit-title">
+        <h2 id="bulkTitle">Edit many policies</h2>
+        <p id="bulkSubtitle"></p>
+      </div>
+      <button class="icon-btn" type="button" id="bulkClose" aria-label="Close">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </header>
+
+    <p class="muted bulk-hint">
+      Tick a field to change it, then type the new value. Every ticked field is
+      written to all the chosen policies; untouched fields are left alone.
+    </p>
+
+    <div class="bulk-fields" id="bulkFields"></div>
+
+    <footer class="edit-foot">
+      <p class="muted" id="bulkNote"></p>
+      <span class="spacer"></span>
+      <button class="btn ghost" type="button" id="bulkCancel">Cancel</button>
+      <button class="btn primary" type="button" id="bulkApply">Apply to all</button>
     </footer>
   </form>
 </dialog>

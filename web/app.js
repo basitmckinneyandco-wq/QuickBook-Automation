@@ -14,6 +14,13 @@ const state = {
   search: "",
   status: "all",
   invoiceStatus: "all",
+  invoiceKind: "all",
+  // Rows sent one at a time: source_id -> {phase, operation, label}. Held in
+  // state so the badge survives the table being rebuilt when another row lands.
+  rowJobs: new Map(),
+  // Rows kept on screen a moment after they stop matching the filters, so a
+  // result can be read before the row leaves: source_id -> "hold" | "leaving".
+  lingering: new Map(),
   source: "all",
   dateRange: "all",
   dateFrom: "",
@@ -27,6 +34,16 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 const DONE = new Set(["completed", "already_exists"]);
+// Settled, but not by being created: deliberately marked as never wanted. Kept
+// apart from DONE so it is never counted as work achieved, and apart from the
+// pending states so it is never counted as work outstanding.
+const NOT_NEEDED = "not_needed";
+
+/** Is this kind of invoice still owed on this row? */
+function invoiceOutstanding(record, kind) {
+  const status = record[`${kind.key}_status`];
+  return Boolean(kind.operation) && !DONE.has(status) && status !== NOT_NEEDED;
+}
 
 // The sheet has thousands of rows; painting them all locks the browser up.
 const RENDER_CAP = 300;
@@ -149,7 +166,7 @@ const EXTRA_COLUMNS = [
       // Same shape as the customer column: Send while there is nothing there,
       // Update once every invoice this row can raise has been raised.
       const outstanding = invoiceKindsFor(record).some(
-        (kind) => kind.operation && !DONE.has(record[`${kind.key}_status`])
+        (kind) => invoiceOutstanding(record, kind)
       );
       const actions = document.createElement("div");
       actions.className = "row-actions";
@@ -168,6 +185,21 @@ const EXTRA_COLUMNS = [
    column the batch is actually working on. Showing it in both made sending
    customers look as though invoices were being raised too. */
 function batchBadge(sourceId, column) {
+  // A row sent on its own is tracked here rather than in the button, because
+  // any other row finishing rebuilds the whole table and would wipe a badge
+  // that lived only in the markup.
+  const own = state.rowJobs.get(sourceId);
+  if (own && operationColumn(own.operation) === column) {
+    if (own.phase === "sending") {
+      const badge = tag("", "sending");
+      const spinner = document.createElement("span");
+      spinner.className = "spinner-sm";
+      badge.append(spinner, document.createTextNode(own.label || "Sending…"));
+      return badge;
+    }
+    return tag("Queued", "queued");
+  }
+
   if (batchColumn() !== column) return null;
   if (state.sending.has(sourceId)) {
     const badge = tag("", "sending");
@@ -182,11 +214,36 @@ function batchBadge(sourceId, column) {
 
 /** Which column the running batch belongs to: "customer", "invoice" or "". */
 function batchColumn() {
-  const operation = state.sendingOperation;
+  return operationColumn(state.sendingOperation);
+}
+
+/** Which column an operation belongs to: "customer", "invoice" or "". */
+function operationColumn(operation) {
   if (!operation) return "";
   return INVOICE_KINDS.some((kind) => kind.operation === operation)
     ? "invoice"
     : "customer";
+}
+
+/** Mark one row as queued or in flight, and redraw it. */
+function markRow(sourceId, phase, operation, label = "") {
+  state.rowJobs.set(sourceId, { phase, operation, label });
+  refreshRow(sourceId);
+}
+
+function clearRow(sourceId) {
+  state.rowJobs.delete(sourceId);
+}
+
+/* Redraw one row in place. Clicking Send changes a single badge, and
+   rebuilding all three hundred rows to show it made the click itself feel
+   heavy - the work happened before the browser could paint the press. */
+function refreshRow(sourceId) {
+  const row = document.querySelector(`.sheet-grid tbody tr[data-id="${CSS.escape(sourceId)}"]`);
+  if (!row) return;
+  const record = state.records.find((entry) => entry.source_id === sourceId);
+  if (!record) return;
+  row.replaceWith(buildRow(record));
 }
 
 /** The live Invoice button for a row, re-found after every re-render. */
@@ -288,6 +345,7 @@ const STATUS_LABEL = {
   completed: "Created",
   already_exists: "Already there",
   failed: "Failed",
+  not_needed: "Not needed",
 };
 
 const PAGES = {
@@ -310,9 +368,36 @@ function readTheme() {
   }
 }
 
-function applyTheme(theme) {
-  document.documentElement.dataset.theme = theme;
-  $("themeToggle").checked = theme === "dark";
+/* Swapping the theme repaints every colour at once, which cuts rather than
+   fades. Transitioning each element instead is worse: with a few hundred log
+   entries on screen that is a few hundred simultaneous animations, and the
+   page stutters while text fades through a stage where it is invisible.
+
+   A view transition avoids both. The browser takes a picture of the page
+   before and after and cross-fades the two as images, on the compositor - one
+   animation whatever the page holds. Where it is not supported the swap is
+   instant, which is what it always was. */
+function applyTheme(theme, { animate = false } = {}) {
+  const root = document.documentElement;
+  const swap = () => {
+    root.dataset.theme = theme;
+    $("themeToggle").checked = theme === "dark";
+  };
+  const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (animate && !still && typeof document.startViewTransition === "function") {
+    // Tags, tiles and buttons carry their own colour transitions for hover.
+    // Left alone they run a second time underneath the cross-fade, each on its
+    // own timing, which reads as borders lagging behind the rest of the page.
+    // For the length of the swap they are told to change instantly; the
+    // cross-fade is doing the animating.
+    const transition = document.startViewTransition(() => {
+      root.classList.add("theme-instant");
+      swap();
+    });
+    transition.finished.finally(() => root.classList.remove("theme-instant"));
+  } else {
+    swap();
+  }
   try {
     localStorage.setItem("qb-theme", theme);
   } catch {
@@ -711,6 +796,9 @@ function renderInvoiceBars() {
     let made = 0;
     for (const record of state.records) {
       if (!kind.applies(record)) continue;
+      // A kind marked as not needed is not owed, so it is not counted as due -
+      // otherwise the bar could never reach the end.
+      if (record[`${kind.key}_status`] === NOT_NEEDED) continue;
       due += 1;
       if (live && DONE.has(record[`${kind.key}_status`])) made += 1;
     }
@@ -887,6 +975,7 @@ function renderSheetCards(rows) {
 
     for (const kind of invoiceKindsFor(record)) {
       if (!kind.operation) continue;
+      if (record[`${kind.key}_status`] === NOT_NEEDED) continue;   // not owed
       const tally = invoices.get(kind.key);
       tally.due += 1;
       if (live && DONE.has(record[`${kind.key}_status`])) tally.made += 1;
@@ -1191,6 +1280,47 @@ function toISODate(value) {
   return `${value.getFullYear()}-${month}-${day}`;
 }
 
+/* ═══ letting a finished row be read before it goes ═══════════════════════
+   On a "Pending" filter a row stops matching the moment it succeeds, so it
+   used to vanish in the same frame its result arrived - the one thing the
+   person was waiting to see. Each finished row is held in place for a beat
+   showing Created, then fades out on its own. */
+
+const LINGER_MS = 650;      // long enough to read "Created", no longer
+const FADE_MS = 340;
+
+function holdThenDrop(sourceIds) {
+  // Ask the filters once, with the linger list set aside so it cannot answer
+  // "still visible" about the very rows being tested.
+  const held = state.lingering;
+  state.lingering = new Map();
+  const visible = new Set(visibleRecords().map((record) => record.source_id));
+  state.lingering = held;
+
+  const known = new Set(state.records.map((record) => record.source_id));
+  // Only rows the filters would now hide; anything still matching just stays.
+  const leaving = sourceIds.filter((id) => known.has(id) && !visible.has(id));
+  if (!leaving.length) return;
+
+  for (const id of leaving) state.lingering.set(id, "hold");
+  renderTable();
+
+  setTimeout(() => {
+    // The fade is put straight onto the rows already on screen. Re-rendering
+    // to start it would rebuild every row in the table and restart their
+    // animations underneath this one, which is what made it stutter.
+    for (const id of leaving) {
+      state.lingering.set(id, "leaving");
+      const row = document.querySelector(`.sheet-grid tbody tr[data-id="${CSS.escape(id)}"]`);
+      if (row) row.classList.add("row-leaving");
+    }
+    setTimeout(() => {
+      for (const id of leaving) state.lingering.delete(id);
+      renderTable();                     // the list closes up, once
+    }, REDUCED_MOTION ? 0 : FADE_MS);
+  }, LINGER_MS);
+}
+
 /* "Already there" and "Created" both mean the work is done, so the filters
    treat them as one thing rather than splitting a distinction nobody acts on. */
 function filterStatus(value) {
@@ -1203,15 +1333,22 @@ function visibleRecords() {
   const needle = state.search.trim().toLowerCase();
   const span = dateWindow();
   return state.records.filter((record) => {
+    // A row that has just succeeded is held for a moment even though it no
+    // longer matches - so the result can be read before it goes. See
+    // holdThenDrop().
+    if (state.lingering.has(record.source_id)) return true;
     if (state.status !== "all" && filterStatus(record.status) !== state.status) return false;
-    // A row matches when any of its invoices is in that state, since the
-    // column shows one badge per kind.
+    // Two filters working together: which kind of invoice to look at, and what
+    // state it must be in. "Premium only" + "Created" answers the question the
+    // office actually asks - which policies have had their premium raised.
+    const kinds = invoiceKindsFor(record).filter(
+      (kind) => kind.operation
+        && (state.invoiceKind === "all" || kind.key === state.invoiceKind)
+    );
+    if (state.invoiceKind !== "all" && !kinds.length) return false;
     if (
       state.invoiceStatus !== "all" &&
-      !invoiceKindsFor(record).some(
-        (kind) =>
-          kind.operation && filterStatus(record[`${kind.key}_status`]) === state.invoiceStatus
-      )
+      !kinds.some((kind) => filterStatus(record[`${kind.key}_status`]) === state.invoiceStatus)
     ) {
       return false;
     }
@@ -1541,7 +1678,7 @@ function openInvoicePicker(sourceIds) {
   // Start with whatever is still outstanding, so the common case is one click.
   const runnable = kinds.filter((kind) => kind.operation);
   const outstanding = runnable.filter((kind) =>
-    invoiceTargets(kind, records).some((record) => !DONE.has(record[`${kind.key}_status`]))
+    invoiceTargets(kind, records).some((record) => invoiceOutstanding(record, kind))
   );
   const preselect = outstanding.length ? outstanding : runnable;
   state.invoicing = {
@@ -1587,15 +1724,22 @@ function invoiceBlockers(records, kinds) {
 }
 
 function invoiceChoice(kind, records) {
+  // Not every policy earns all three invoices. A kind can be marked as not
+  // needed, which takes it out of the counts and the filters for good - rather
+  // than sitting as "Pending" forever and being mistaken for work outstanding.
+  const targets = invoiceTargets(kind, records);
+  const skipped = targets.length > 0
+    && targets.every((record) => record[`${kind.key}_status`] === "not_needed");
+
   const label = document.createElement("label");
-  label.className = "invoice-choice";
+  label.className = "invoice-choice" + (skipped ? " is-skipped" : "");
   label.dataset.kind = kind.key;
 
   const input = document.createElement("input");
   input.type = "checkbox";
   input.value = kind.key;
-  input.checked = Boolean((state.invoicing || {}).kinds?.has(kind.key));
-  input.disabled = !kind.operation;
+  input.checked = !skipped && Boolean((state.invoicing || {}).kinds?.has(kind.key));
+  input.disabled = !kind.operation || skipped;
   input.addEventListener("change", () => {
     const chosen = (state.invoicing || {}).kinds;
     if (!chosen) return;
@@ -1607,13 +1751,87 @@ function invoiceChoice(kind, records) {
   const text = document.createElement("div");
   const title = document.createElement("strong");
   title.textContent = kind.label;
+  if (skipped) title.append(tag("Not needed", "not_needed"));
   const note = document.createElement("span");
   note.className = "muted";
-  note.textContent = kind.operation ? invoiceChoiceNote(kind, records) : kind.note;
+  note.textContent = skipped
+    ? "Marked as not needed, so it will not be created."
+    : (kind.operation ? invoiceChoiceNote(kind, records) : kind.note);
   text.append(title, note);
 
   label.append(input, text);
+  // Premium only. Commission and fees already answer "is this wanted?" from the
+  // row itself - no commission or no fee means no invoice - so marking them by
+  // hand would be a second, competing answer to a question already settled.
+  if (kind.key === "premium" && kind.operation) {
+    label.append(notNeededButton(kind, targets, skipped));
+  }
   return label;
+}
+
+/** The small link that marks a kind as not needed, or brings it back. */
+function notNeededButton(kind, targets, skipped) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "linky skip-link";
+  button.textContent = skipped ? "Need it after all" : "Not needed";
+  button.title = skipped
+    ? `Put ${kind.label.toLowerCase()} back on the list for these policies`
+    : `Never create ${kind.label.toLowerCase()} for these policies`;
+  // Inside a <label>, so a click would otherwise toggle the checkbox too.
+  button.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const created = targets.filter((record) => DONE.has(record[`${kind.key}_status`]));
+    if (!skipped && created.length) {
+      await ask({
+        title: "Already in QuickBooks",
+        sub: `${created.length} of these already has this invoice, so it cannot be `
+           + "marked as not needed. Delete it in QuickBooks first.",
+        ok: "Close",
+        tone: "danger",
+      });
+      return;
+    }
+    button.disabled = true;
+    try {
+      for (const record of targets) {
+        const payload = await api("/api/invoice-needed", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            source_id: record.source_id, kind: kind.key, needed: skipped,
+          }),
+        }, API_TIMEOUT_MS);
+        Object.assign(record, payload.record || {});
+      }
+      if (!skipped) (state.invoicing || { kinds: new Set() }).kinds.delete(kind.key);
+      redrawInvoiceChoices();
+      renderTable();
+      renderSheetCards(visibleRecords());
+      toast(skipped
+        ? `${kind.label} is back on the list.`
+        : `${kind.label} marked as not needed.`);
+    } catch (error) {
+      await ask({
+        title: "Could not change that",
+        detail: error.message,
+        ok: "Close",
+        tone: "danger",
+      });
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+/** Rebuild the choices in place, so a "not needed" change shows immediately. */
+function redrawInvoiceChoices() {
+  const records = invoicingRecords();
+  const kinds = INVOICE_KINDS.filter((kind) => records.some((record) => kind.applies(record)));
+  $("invoiceChoices").replaceChildren(...kinds.map((kind) => invoiceChoice(kind, records)));
+  renderInvoiceChoice();
 }
 
 /** One line saying what this choice will do to the rows in hand. */
@@ -1974,7 +2192,18 @@ function cellText(record, column) {
     // The sheet stores 0.175 for 17.5%.
     return `${(number * (Math.abs(number) <= 1 ? 100 : 1)).toFixed(2)}%`;
   }
+  if (column.type === "date") return usDate(text);
   return text;
+}
+
+/* Dates are held as 2026-01-06 - the one spelling that sorts, compares and
+   travels without ambiguity - but that is not how the office reads a date.
+   Shown as 01/06/2026, the same way the sheet and QuickBooks show it. */
+function usDate(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value).trim());
+  if (!match) return value;
+  const [, year, month, day] = match;
+  return `${month}/${day}/${year}`;
 }
 
 function buildRow(record) {
@@ -1982,6 +2211,10 @@ function buildRow(record) {
 
   const tr = document.createElement("tr");
   tr.dataset.id = record.source_id;
+  // Finished, and on its way off a filter it no longer matches.
+  const linger = state.lingering.get(record.source_id);
+  if (linger === "hold") tr.classList.add("row-settled");
+  else if (linger === "leaving") tr.classList.add("row-leaving");
 
   const check = document.createElement("td");
   check.className = "check";
@@ -2195,7 +2428,10 @@ function drawActivity(container, events, detailed = false) {
 
 function activityEntry(event) {
   const item = document.createElement("div");
-  item.className = `act ${event.status}`;
+  const key = eventKey(event);
+  const fresh = seenEvents.size > 0 && !seenEvents.has(key);
+  seenEvents.add(key);
+  item.className = `act ${event.status}${fresh ? " just-in" : ""}`;
   const body = div("act-body", "");
   body.append(div("strong", event.label), div("sub", event.message));
   item.append(div("dot", ""), body, whenCell(event));
@@ -2226,10 +2462,22 @@ const OPERATION_LABEL = {
   fees_invoice: "fees invoice",
 };
 
+/* Which log entries this page has already shown. Only the genuinely new ones
+   animate in - replaying the entrance on all 200 every time the log is redrawn
+   would be a flash, not an arrival. */
+const seenEvents = new Set();
+
+function eventKey(event) {
+  return `${event.created_at}|${event.source_id}|${event.operation}|${event.status}`;
+}
+
 function logEntry(event) {
   const failed = event.status === "failed" || event.status === "needs_review";
   const item = document.createElement("details");
-  item.className = `log ${event.status}`;
+  const key = eventKey(event);
+  const fresh = seenEvents.size > 0 && !seenEvents.has(key);
+  seenEvents.add(key);
+  item.className = `log ${event.status}${fresh ? " just-in" : ""}`;
   item.open = event.status === "failed";   // problems are open by default
 
   const head = document.createElement("summary");
@@ -2318,9 +2566,156 @@ function renderSelection() {
   invoice.classList.remove("is-busy");
   invoice.textContent = live ? "Send Invoice" : "Send Invoice (safe test)";
 
+  const bulk = $("bulkEditButton");
+  bulk.disabled = count === 0;
+  bulk.textContent = count ? `Edit ${count} selected` : "Edit selected";
+
   for (const box of document.querySelectorAll("#rows input[type=checkbox]")) {
     const row = box.closest("tr");
     if (row) box.checked = state.selected.has(row.dataset.id);
+  }
+}
+
+/* ═══ editing many policies at once ═══════════════════════════════════════
+   The same correction over and over - a carrier spelt differently, a fee that
+   applies to a whole batch - is the one thing the row-by-row editor is bad at.
+   A field is only written when its box is ticked, so an empty box can mean
+   "clear this" rather than "leave it alone". */
+
+function openBulkEdit() {
+  const ids = [...state.selected];
+  if (!ids.length) return;
+  const records = ids
+    .map((id) => state.records.find((entry) => entry.source_id === id))
+    .filter(Boolean);
+  if (!records.length) return;
+
+  $("bulkSubtitle").textContent =
+    `${records.length} polic${records.length === 1 ? "y" : "ies"} selected`;
+
+  const fields = SHEET_COLUMNS.filter((column) => column.key !== "customer_name");
+  $("bulkFields").replaceChildren(...fields.map((column) => bulkField(column, records)));
+  $("bulkNote").textContent = "Nothing is changed until you press Apply.";
+  $("bulkDialog").showModal();
+}
+
+/** One row of the bulk editor: tick to change, then the value to write. */
+function bulkField(column, records) {
+  const row = document.createElement("label");
+  row.className = "bulk-field";
+
+  const tick = document.createElement("input");
+  tick.type = "checkbox";
+  tick.dataset.field = column.key;
+
+  const name = document.createElement("span");
+  name.className = "bulk-label";
+  name.textContent = column.label;
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.disabled = true;
+  input.dataset.value = column.key;
+  // What the chosen rows hold now, so it is clear what is being replaced.
+  const values = new Set(records.map((record) => {
+    const raw = rawValue(record, column.key).trim();
+    return column.type === "date" ? usDate(raw) : raw;
+  }));
+  input.placeholder = values.size === 1
+    ? `currently ${[...values][0] || "(empty)"}`
+    : `${values.size} different values`;
+  if (column.type === "date") input.placeholder += "  ·  type as MM/DD/YYYY";
+
+  tick.addEventListener("change", () => {
+    input.disabled = !tick.checked;
+    row.classList.toggle("is-on", tick.checked);
+    if (tick.checked) input.focus();
+    renderBulkNote();
+  });
+  input.addEventListener("input", renderBulkNote);
+
+  row.append(tick, name, input);
+  return row;
+}
+
+/** What the current ticks will do, said plainly before anything happens. */
+function renderBulkNote() {
+  const chosen = [...document.querySelectorAll("#bulkFields input[type=checkbox]")]
+    .filter((tick) => tick.checked);
+  const rows = state.selected.size;
+  $("bulkNote").textContent = chosen.length
+    ? `${chosen.length} field${chosen.length === 1 ? "" : "s"} on ${rows} polic${rows === 1 ? "y" : "ies"}.`
+    : "Tick a field to change it.";
+  $("bulkApply").disabled = chosen.length === 0;
+}
+
+async function applyBulkEdit() {
+  const values = {};
+  for (const tick of document.querySelectorAll("#bulkFields input[type=checkbox]")) {
+    if (!tick.checked) continue;
+    const box = document.querySelector(`#bulkFields input[data-value="${tick.dataset.field}"]`);
+    values[tick.dataset.field] = box ? box.value.trim() : "";
+  }
+  const ids = [...state.selected];
+  const names = Object.keys(values);
+  if (!names.length || !ids.length) return;
+
+  const blanks = names.filter((field) => !values[field]);
+  const go = await ask({
+    title: `Change ${names.length} field${names.length === 1 ? "" : "s"} on ${ids.length} policies?`,
+    sub: "The corrections are kept locally and survive every refresh of the sheet. "
+       + "They do not change the Google Sheet itself.",
+    detail: names.map((field) => `${field}  ->  ${values[field] || "(cleared)"}`).join("\n"),
+    note: blanks.length
+      ? `${blanks.length} field${blanks.length === 1 ? " was" : "s were"} left empty, so `
+        + `${blanks.length === 1 ? "it" : "they"} will be cleared on every chosen policy.`
+      : "Anything already sent to QuickBooks needs sending again to pick this up.",
+    ok: "Apply to all",
+    cancel: "Cancel",
+    tone: "ask",
+  });
+  if (!go) return;
+
+  const button = $("bulkApply");
+  const label = button.textContent;
+  setBusy(button, "Applying…");
+  try {
+    const payload = await api("/api/edit-many", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids, values }),
+    }, SEND_TIMEOUT_MS);
+
+    for (const updated of payload.updated || []) {
+      const index = state.records.findIndex((entry) => entry.source_id === updated.source_id);
+      if (index >= 0) state.records[index] = { ...state.records[index], ...updated };
+    }
+    $("bulkDialog").close();
+    renderAll();
+
+    const failed = payload.failed || [];
+    if (failed.length) {
+      await ask({
+        title: `${payload.updated.length} changed, ${failed.length} refused`,
+        sub: "The rest went through. These could not take one of the values:",
+        detail: failed.map((one) => `${one.source_id}: ${one.error}`).join("\n"),
+        ok: "Close",
+        tone: "danger",
+      });
+    } else {
+      toast(`${payload.updated.length} policies updated.`);
+    }
+  } catch (error) {
+    await ask({
+      title: "Nothing was changed",
+      detail: error.message,
+      ok: "Close",
+      tone: "danger",
+    });
+  } finally {
+    button.classList.remove("is-busy");
+    button.textContent = label;
+    button.disabled = false;
   }
 }
 
@@ -2745,16 +3140,25 @@ function runQueued(task) {
     Clicking the row button is itself the confirmation - no popup on top of it. */
 async function actOnPolicy(sourceId, operation, button, label = "") {
   const busyLabel = label || (operation === "update_customer" ? "Updating…" : "Sending…");
-  const startLabel = queueDepth > 0 ? "Queued…" : busyLabel;
-  if (!button) toast(startLabel);
+  const waiting = queueDepth > 0;
+  const startLabel = waiting ? "Queued…" : busyLabel;
   if (button) {
     button.disabled = true;
     button.classList.add("is-busy");
     button.dataset.label = button.textContent;
     button.innerHTML = `<span class="spinner-sm"></span>${startLabel}`;
   }
+  // The badge on the row, which outlives the button: the table is rebuilt
+  // every time some other row finishes, and the button goes with it.
+  markRow(sourceId, waiting ? "queued" : "sending", operation, busyLabel);
+
   await runQueued(async () => {
+    markRow(sourceId, "sending", operation, busyLabel);
     if (button) button.innerHTML = `<span class="spinner-sm"></span>${busyLabel}`;
+    // One row still takes several seconds against QuickBooks, and its steps are
+    // logged as they happen - so the History page fills in here too, not only
+    // during a bulk send.
+    startHistoryFeed();
     try {
       const payload = await api(
         "/api/process",
@@ -2767,17 +3171,27 @@ async function actOnPolicy(sourceId, operation, button, label = "") {
       );
       state.records = payload.records || state.records;
       state.activity = payload.activity || state.activity;
+      // Cleared only now: the badge stays up from the click right through the
+      // queue and the send, and gives way to the row's real status.
+      clearRow(sourceId);
       renderAll();   // rebuilds the row, so the button above no longer exists
       const result = (payload.results || [])[0];
       if (result) toast(`${result.label}: ${result.message}`, result.status === "failed");
+      // Its new status may well have taken it off the current filter. Let it be
+      // seen first.
+      holdThenDrop([sourceId]);
     } catch (error) {
+      clearRow(sourceId);
       // The row was never rebuilt, so put the button back the way it was.
       if (button) {
         button.disabled = false;
         button.classList.remove("is-busy");
         button.textContent = button.dataset.label || busyLabel;
       }
+      renderTable();
       await recoverFromSendFailure(error);
+    } finally {
+      stopHistoryFeed();
     }
   });
 }
@@ -2909,6 +3323,8 @@ async function quickBooksIsReady() {
    server publishes what it has finished. Polling that is what lets each row
    show "Sending…", then flip to Created, while the rest sit in the queue. */
 let progressTimer = null;
+let historyTimer = null;
+let lastProgressMark = "";
 
 function watchProgress(button, what) {
   clearInterval(progressTimer);
@@ -2932,19 +3348,65 @@ function watchProgress(button, what) {
     state.sendingOperation = progress.operation || state.sendingOperation;
     state.sending = new Set(progress.current ? [progress.current] : []);
     state.queued = new Set(progress.queue || []);
-    renderTable();
-    renderSheetCards(visibleRecords());
+
+    // Redrawn only when the batch has actually moved on. The poll runs about
+    // once a second, and rebuilding three hundred rows on every tick made the
+    // page heavy to use while a batch was running.
+    const mark = `${progress.done}|${progress.current}|${(progress.queue || []).length}`;
+    if (mark !== lastProgressMark) {
+      lastProgressMark = mark;
+      renderTable();
+      renderSheetCards(visibleRecords());
+    }
 
     if (button) {
       button.innerHTML =
         `<span class="spinner-sm"></span>${progress.done} of ${progress.total} — ${what}`;
     }
   }, 900);
+
+  startHistoryFeed();
+}
+
+/* History fills in as the work happens rather than all at once at the end.
+   Every row is written to the log the moment it finishes, so there is no
+   reason to make someone watching the History page wait for the other 49. */
+function startHistoryFeed() {
+  clearInterval(historyTimer);
+  historyTimer = setInterval(async () => {
+    let history;
+    try {
+      history = await api("/api/activity", {}, 10000);
+    } catch {
+      return;   // a missed poll changes nothing; the next one catches up
+    }
+    const entries = history.activity || [];
+    // Compared by the newest entry, not by how many there are: the log is
+    // served capped at 200, so once it is full the count stops moving and a
+    // length check would report "nothing new" for the rest of time.
+    if (historyMark(entries) === historyMark(state.activity)) return;
+    state.activity = entries;
+    renderActivity();
+  }, 1500);
+}
+
+function stopHistoryFeed() {
+  clearInterval(historyTimer);
+  historyTimer = null;
+}
+
+/** Identifies the newest entry, so a changed log is noticed however long it is. */
+function historyMark(entries) {
+  const newest = (entries || [])[0];
+  if (!newest) return "";
+  return `${entries.length}|${newest.created_at}|${newest.source_id}|${newest.status}`;
 }
 
 function stopWatchingProgress() {
   clearInterval(progressTimer);
+  stopHistoryFeed();
   progressTimer = null;
+  lastProgressMark = "";
   state.sending = new Set();
   state.queued = new Set();
   state.sendingOperation = "";
@@ -2957,12 +3419,14 @@ async function processBatch(operation, ids, buttonId, { noun, label, clear = fal
   const button = $(buttonId);
   const what = noun || `${batch.length} polic${batch.length === 1 ? "y" : "ies"}`;
   setBusy(button, queueDepth > 0 ? "Queued…" : `Working on ${what}…`);
+  // Badged before joining the queue, not after: a batch waiting behind another
+  // send would otherwise show nothing at all until its turn came round.
+  state.sendingOperation = operation;
+  state.queued = new Set(batch);
+  renderTable();
+
   await runQueued(async () => {
     button.innerHTML = `<span class="spinner-sm"></span>Working on ${what}…`;
-    // Set before the first poll so the very first "Queued" badges already
-    // land in the right column.
-    state.sendingOperation = operation;
-    state.queued = new Set(batch);
     watchProgress(button, what);
     try {
       const payload = await api(
@@ -2992,6 +3456,9 @@ async function processBatch(operation, ids, buttonId, { noun, label, clear = fal
       button.classList.remove("is-busy");
       renderAll();
       renderSelection();
+      // Rows the batch has just taken off the current filter stay a moment
+      // longer, so the result of the work can be read before they go.
+      holdThenDrop(batch);
     }
   });
 }
@@ -3084,7 +3551,7 @@ function toast(message, isError = false) {
 function wire() {
   applyTheme(readTheme());
   $("themeToggle").addEventListener("change", (event) => {
-    applyTheme(event.target.checked ? "dark" : "light");
+    applyTheme(event.target.checked ? "dark" : "light", { animate: true });
   });
 
   applySidebar(sidebarCollapsed());
@@ -3164,6 +3631,10 @@ function wire() {
   $("useCompany").addEventListener("click", useCompany);
   $("companyRescan").addEventListener("click", () => loadCompanies({ announce: true }));
   $("sourceSave").addEventListener("click", saveDataSource);
+  $("bulkEditButton").addEventListener("click", openBulkEdit);
+  $("bulkApply").addEventListener("click", applyBulkEdit);
+  $("bulkCancel").addEventListener("click", () => $("bulkDialog").close());
+  $("bulkClose").addEventListener("click", () => $("bulkDialog").close());
   document.querySelector('[data-lock-for="source"]').addEventListener("click", toggleSourceLock);
   setSourceLock(true);                   // always starts protected
   $("processButton").addEventListener("click", () => processSelected("create_customer"));
@@ -3187,6 +3658,11 @@ function wire() {
   });
   $("invoiceFilter").addEventListener("change", (event) => {
     state.invoiceStatus = event.target.value;
+    renderTable();
+    renderSelection();
+  });
+  $("invoiceKindFilter").addEventListener("change", (event) => {
+    state.invoiceKind = event.target.value;
     renderTable();
     renderSelection();
   });

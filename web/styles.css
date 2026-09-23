@@ -889,6 +889,12 @@ input[type=checkbox]:disabled { cursor: not-allowed; }
   background: var(--accent-tint); color: var(--accent);
 }
 .tag.queued { background: var(--line-soft); color: var(--faint); }
+/* Deliberately grey and quiet: settled, but nothing was done and nothing is
+   owed. It must not read as success, nor as something still to chase. */
+.tag.not_needed {
+  background: transparent; color: var(--faint);
+  border: 1px dashed var(--line); font-weight: 500;
+}
 .tag.paid { background: var(--good-tint); color: var(--good); }
 .tag.open { background: var(--warn-tint); color: var(--warn); }
 
@@ -1101,6 +1107,93 @@ tbody tr.editing .row-btn { opacity: 1; }
 td[data-key="__invoice"] { white-space: nowrap; }
 td[data-key="__invoice"] .tag { display: block; margin-bottom: 3px; text-align: center; }
 
+/* Light <-> dark. The browser cross-fades a picture of the whole page, so the
+   cost is one compositor animation no matter how much is on screen - the page
+   below can hold two hundred log entries and it makes no difference. Only the
+   duration is set here; everything else is the browser's own default. */
+/* Held only while the cross-fade runs: the page beneath changes colour in one
+   frame, so nothing animates twice. */
+.theme-instant,
+.theme-instant *,
+.theme-instant *::before,
+.theme-instant *::after {
+  transition: none !important;
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: .3s;
+  animation-timing-function: ease;
+  mix-blend-mode: normal;   /* plain cross-fade; the default blend muddies text */
+}
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) { animation: none; }
+}
+
+/* A row that has just finished, held on a filter it no longer matches so the
+   result can be read. First it settles - a brief green wash saying "done" -
+   then it fades and slides away on its own. */
+.sheet-grid tbody tr.row-settled td {
+  animation: row-settle .65s ease-out;
+}
+@keyframes row-settle {
+  0%   { background-color: var(--good-tint); }
+  55%  { background-color: var(--good-tint); }
+  100% { background-color: transparent; }
+}
+
+/* Opacity and transform only, so the whole row leaves on the compositor
+   rather than forcing a layout on every frame. */
+.sheet-grid tbody tr.row-leaving {
+  animation: row-leave .34s cubic-bezier(.4, 0, 1, 1) forwards;
+  pointer-events: none;
+  will-change: opacity, transform;
+}
+@keyframes row-leave {
+  from { opacity: 1; transform: none; }
+  to   { opacity: 0; transform: translateX(22px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet-grid tbody tr.row-settled { animation: none; }
+  .sheet-grid tbody tr.row-leaving { animation: none; opacity: 0; }
+}
+
+/* A log entry arriving while the work runs. Only new ones carry this class,
+   so the rest of the list stays still underneath. */
+.log.just-in, .act.just-in { animation: log-arrive .42s cubic-bezier(.2, .7, .3, 1); }
+@keyframes log-arrive {
+  from { opacity: 0; transform: translateY(-7px); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .log.just-in, .act.just-in { animation: none; }
+}
+
+/* the bulk editor: one row per field, ticked to take effect */
+.bulk-hint { padding: 0 20px; margin: 12px 0 0; font-size: 12.5px; }
+.bulk-fields {
+  display: grid; gap: 4px; padding: 12px 20px 0; overflow-y: auto; max-height: 52vh;
+}
+.bulk-field {
+  display: grid; grid-template-columns: 18px 150px 1fr; gap: 12px; align-items: center;
+  padding: 7px 9px; border-radius: var(--r-sm); cursor: pointer;
+  border: 1px solid transparent; transition: background .14s, border-color .14s;
+}
+.bulk-field:hover { background: var(--surface-2); }
+.bulk-field.is-on { background: var(--accent-tint); border-color: var(--accent); }
+.bulk-label { font-size: 12.5px; font-weight: 600; }
+.bulk-field input[type="text"] {
+  padding: 7px 10px; font-size: 12.5px; min-width: 0;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); color: var(--text);
+}
+.bulk-field input[type="text"]:disabled { background: var(--surface-2); cursor: not-allowed; }
+.bulk-field input[type="text"]:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint);
+}
+
 /* the invoice picker: one card per kind of invoice */
 .invoice-choices { display: grid; gap: 10px; padding: 16px 20px; overflow-y: auto; }
 .invoice-choice {
@@ -1110,6 +1203,23 @@ td[data-key="__invoice"] .tag { display: block; margin-bottom: 3px; text-align: 
 }
 .invoice-choice:hover { border-color: var(--accent); }
 .invoice-choice.selected { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint); }
+
+/* Marked as not needed: greyed out, but still legible and still reversible. */
+.invoice-choice.is-skipped {
+  background: var(--surface-2); border-style: dashed; cursor: default;
+}
+.invoice-choice.is-skipped:hover { border-color: var(--line); }
+.invoice-choice.is-skipped strong { color: var(--muted); font-weight: 600; }
+.invoice-choice.is-skipped input { opacity: .4; }
+.invoice-choice strong { display: flex; align-items: center; gap: 8px; }
+
+/* The "Not needed" / "Need it after all" link on each card. */
+.skip-link {
+  margin-left: auto; align-self: center; flex: 0 0 auto;
+  font-size: 11.5px; white-space: nowrap;
+  background: none; border: 0; padding: 4px 2px; cursor: pointer;
+}
+.skip-link:disabled { opacity: .5; cursor: wait; }
 .invoice-choice:has(input:disabled) { opacity: .55; cursor: not-allowed; }
 .invoice-choice input { margin-top: 3px; accent-color: var(--accent); }
 .invoice-choice > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
@@ -1238,6 +1348,10 @@ td[data-key="__invoice"] .tag { display: block; margin-bottom: 3px; text-align: 
   transition: background .12s, color .12s, border-color .12s;
 }
 .mini-btn:hover { background: var(--accent-tint); color: var(--accent); border-color: var(--accent); }
+/* Acknowledges the press in the same frame as the click, before anything else
+   has run - so the button never feels like it missed it. */
+.mini-btn:active { transform: scale(.94); transition-duration: .04s; }
+.btn:active:not(:disabled) { transform: translateY(1px); }
 .act-empty { padding: 14px 0; color: var(--muted); font-size: 13px; }
 
 /* ═══ toast ══════════════════════════════════════════════════════════════ */

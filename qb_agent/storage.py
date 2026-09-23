@@ -291,6 +291,45 @@ class Store:
                 ),
             )
 
+    def set_invoice_needed(
+        self, source_id: str, mode: str, kind: str, needed: bool
+    ) -> None:
+        """Mark one kind of invoice as not wanted for one policy, or wanted again.
+
+        Not every policy earns all three invoices - plenty carry no fee, and
+        some carriers are not commissioned. Marked rows are held here rather
+        than in the sheet, so nothing has to change upstream, and "not needed"
+        is kept apart from "not done yet" in every count and filter.
+        """
+        with self.connection() as connection:
+            if needed:
+                # Only ever clears the mark: a real invoice is never dropped.
+                connection.execute(
+                    "DELETE FROM invoice_state WHERE source_id=? AND mode=? "
+                    "AND kind=? AND status='not_needed'",
+                    (source_id, mode, kind),
+                )
+                return
+            existing = connection.execute(
+                "SELECT status, txn_id FROM invoice_state "
+                "WHERE source_id=? AND mode=? AND kind=?",
+                (source_id, mode, kind),
+            ).fetchone()
+            if existing is not None and existing["txn_id"]:
+                raise ValueError(
+                    "That invoice already exists in QuickBooks, so it cannot be "
+                    "marked as not needed. Delete it in QuickBooks first."
+                )
+            connection.execute(
+                """
+                INSERT INTO invoice_state (source_id, mode, kind, status, updated_at)
+                VALUES (?, ?, ?, 'not_needed', ?)
+                ON CONFLICT(source_id, mode, kind) DO UPDATE SET
+                    status='not_needed', error_message=NULL, updated_at=excluded.updated_at
+                """,
+                (source_id, mode, kind, _now()),
+            )
+
     def invoice_states(self, source_ids: list[str], mode: str) -> dict[str, dict[str, InvoiceState]]:
         """Every invoice held for these rows, as {source_id: {kind: state}}."""
         if not source_ids:

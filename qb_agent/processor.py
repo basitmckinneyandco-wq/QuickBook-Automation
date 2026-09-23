@@ -108,8 +108,24 @@ class Processor:
                 except Exception:
                     pass   # progress reporting must never break the work itself
 
+        # Rows whose invoice of this kind has been marked as not wanted. Held
+        # here rather than filtered in the page, so a bulk send cannot raise
+        # one by going round the dashboard.
+        skipped = self._marked_not_needed(records, operation)
+
         # Step 1: sort out everything that needs no QuickBooks session at all.
         for record in records:
+            if record.source_id in skipped:
+                results[record.source_id] = ProcessingResult(
+                    source_id=record.source_id,
+                    label=record.quickbooks_job_name,
+                    status="not_needed",
+                    message="Marked as not needed, so nothing was sent.",
+                    dry_run=self.config.mode != "quickbooks",
+                    operation=operation.value,
+                )
+                announce(results[record.source_id])
+                continue
             # Creating a customer ignores invoice-only problems (bad date, missing
             # item, zero amount) but still needs the policy number - see
             # WorkRecord.customer_reasons for why.
@@ -138,6 +154,20 @@ class Processor:
             self._run_batch(pending, results, operation, announce)
 
         return [results[record.source_id] for record in records if record.source_id in results]
+
+    def _marked_not_needed(
+        self, records: list[WorkRecord], operation: Operation
+    ) -> set[str]:
+        """Which of these rows have this kind of invoice marked as not wanted."""
+        kind = operation.invoice_kind
+        if not kind:
+            return set()
+        held = self.store.invoice_states([r.source_id for r in records], self.config.mode)
+        return {
+            source_id
+            for source_id, kinds in held.items()
+            if (state := kinds.get(kind)) is not None and state.status == "not_needed"
+        }
 
     def _run_batch(
         self,

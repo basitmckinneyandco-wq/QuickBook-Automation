@@ -99,12 +99,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json(self._fetch())
             elif self.path == "/api/edit":
                 self._json(self._edit())
+            elif self.path == "/api/edit-many":
+                self._json(self._edit_many())
             elif self.path == "/api/process":
                 self._json(self._process())
             elif self.path == "/api/company":
                 self._json(self._company())
             elif self.path == "/api/source":
                 self._json(self._source())
+            elif self.path == "/api/invoice-needed":
+                self._json(self._invoice_needed())
             else:
                 self._json({"error": "Unknown endpoint."}, HTTPStatus.NOT_FOUND)
         except (WebSourceError, EditError, ValueError, json.JSONDecodeError) as exc:
@@ -124,6 +128,21 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             f"({summary['skipped_rows']} skipped)"
         )
         return {"import": summary, "records": self.server.runtime.records_payload()}
+
+    def _edit_many(self) -> dict[str, object]:
+        """Apply the same corrections to every chosen policy."""
+        payload = self._read_json()
+        ids = payload.get("ids")
+        values = payload.get("values")
+        if not isinstance(ids, list) or not ids:
+            raise ValueError("A bulk edit needs at least one policy.")
+        if not isinstance(values, dict) or not values:
+            raise ValueError("A bulk edit needs at least one column.")
+        result = self.server.runtime.edit_many(
+            [str(one) for one in ids], {str(k): str(v) for k, v in values.items()}
+        )
+        log(f"Bulk edit: {len(result['updated'])} rows, {len(result['failed'])} refused")
+        return result
 
     def _edit(self) -> dict[str, object]:
         payload = self._read_json()
@@ -164,6 +183,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         changed = self.server.runtime.use_data_source(str(payload.get("url", "")))
         log(f"Data source changed, {changed['rows']} rows loaded")
         return {"source": changed, "health": self.server.runtime.health()}
+
+    def _invoice_needed(self) -> dict[str, object]:
+        """Mark one kind of invoice as not needed for one policy, or wanted again."""
+        payload = self._read_json()
+        record = self.server.runtime.set_invoice_needed(
+            str(payload.get("source_id", "")),
+            str(payload.get("kind", "")),
+            bool(payload.get("needed", True)),
+        )
+        return {"record": record}
 
     def _process(self) -> dict[str, object]:
         payload = self._read_json()

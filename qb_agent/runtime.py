@@ -51,6 +51,9 @@ class Runtime:
         self.load_error = ""
         self._cache: dict[str, list[list[object]]] | None = None
         self._cached_at = 0.0
+        # How long the feed last took to answer, so the watcher can pace itself
+        # against a slow sheet instead of asking again before it has finished.
+        self._fetch_seconds = 0.0
         # Bumped whenever the loaded rows change, so the page can tell a real
         # change from a poll that found nothing new and re-render only then.
         self.revision = 0
@@ -67,6 +70,8 @@ class Runtime:
         self._dry_gateway = DryRunQuickBooksGateway(config.company.display_name)
         self.processor = Processor(config, self.store, self._gateway)
         self._lock = Lock()
+        # Separate from the app lock: it serialises downloads only.
+        self._fetch_lock = Lock()
 
     def _gateway(self):
         if self.config.mode == "quickbooks":
@@ -232,7 +237,10 @@ class Runtime:
 
     def _watch(self) -> None:
         while True:
-            sleep(WATCH_SECONDS)
+            # A minute between reads, unless the sheet itself is slower than
+            # that: asking again while the last answer is still arriving just
+            # queues downloads behind each other for no fresher data.
+            sleep(max(WATCH_SECONDS, self._fetch_seconds * 1.5))
             if self.loading:
                 continue
             try:
@@ -267,8 +275,12 @@ class Runtime:
         """Pull the feed and load EVERY tab into one combined list of rows."""
         if not self.config.data_source.enabled:
             raise WebSourceError("No data source URL is set in config.json.")
+        # Deliberately outside the lock. Google takes the best part of a minute
+        # to answer, and the watcher asks every minute, so holding the lock
+        # across the download left almost no gap for an edit or a send to get
+        # in - they queued behind the network. Only the swap needs the lock.
+        tabs = self._tabs(force)
         with self._lock:
-            tabs = self._tabs(force)
             saved_edits = self.store.overrides()
             records: dict[str, WorkRecord] = {}
             warnings: list[str] = []
@@ -306,6 +318,10 @@ class Runtime:
             self.source_name = "Google Sheet"
             self.imported_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
             self.import_warnings = warnings
+            # A read that worked clears the last one that did not. Without this
+            # a single refused request left the warning on screen for good,
+            # while the minute-by-minute reads went on succeeding behind it.
+            self.load_error = ""
             return {
                 "source_name": self.source_name,
                 "tab": "all",
@@ -319,12 +335,20 @@ class Runtime:
             }
 
     def _tabs(self, force: bool) -> dict[str, list[list[object]]]:
-        fresh = self._cache is not None and (monotonic() - self._cached_at) < CACHE_SECONDS
-        if force or not fresh:
-            self._cache = fetch_tabs(self.config.data_source.url)
-            self._cached_at = monotonic()
-        assert self._cache is not None
-        return self._cache
+        """The sheet's rows, downloading them only when they are stale.
+
+        Guarded by its own lock, not the app's: two downloads must not overlap,
+        but a download must not stop anything else happening meanwhile.
+        """
+        with self._fetch_lock:
+            fresh = self._cache is not None and (monotonic() - self._cached_at) < CACHE_SECONDS
+            if force or not fresh:
+                started = monotonic()
+                self._cache = fetch_tabs(self.config.data_source.url)
+                self._cached_at = monotonic()
+                self._fetch_seconds = self._cached_at - started
+            assert self._cache is not None
+            return self._cache
 
     def edit(self, source_id: str, values: Mapping[str, str]) -> dict[str, object]:
         """Correct one or more fields of a row, and remember the corrections.
@@ -345,6 +369,51 @@ class Runtime:
             for field, value in values.items():
                 self.store.set_override(source_id, field, str(value))
             return self._record_payload(updated)
+
+    def set_invoice_needed(self, source_id: str, kind: str, needed: bool) -> dict[str, object]:
+        """Mark one kind of invoice as not needed for one policy, or wanted again."""
+        if kind not in set(INVOICE_KINDS.values()):
+            raise ValueError(f"There is no {kind!r} invoice.")
+        with self._lock:
+            record = self.records.get(source_id)
+            if record is None:
+                raise ValueError("That policy is no longer loaded. Refresh and try again.")
+            self.store.set_invoice_needed(source_id, self.config.mode, kind, needed)
+            return self._record_payload(record)
+
+    def edit_many(
+        self, source_ids: list[str], values: Mapping[str, str]
+    ) -> dict[str, object]:
+        """Apply the same corrections to many rows at once.
+
+        Each row is validated on its own, so one that cannot take a value is
+        reported and skipped rather than sinking the rest of the batch.
+        """
+        if not source_ids:
+            raise EditError("No policies were selected.")
+        if not values:
+            raise EditError("No fields were given to change.")
+
+        with self._lock:
+            updated: list[dict[str, object]] = []
+            failed: list[dict[str, str]] = []
+            for source_id in source_ids:
+                record = self.records.get(source_id)
+                if record is None:
+                    failed.append({"source_id": source_id, "error": "No longer loaded."})
+                    continue
+                try:
+                    changed = record
+                    for field, value in values.items():
+                        changed = apply(changed, field, str(value))
+                except EditError as exc:
+                    failed.append({"source_id": source_id, "error": str(exc)})
+                    continue
+                self.records[source_id] = changed
+                for field, value in values.items():
+                    self.store.set_override(source_id, field, str(value))
+                updated.append(self._record_payload(changed))
+            return {"updated": updated, "failed": failed}
 
     def _record_payload(self, record: WorkRecord) -> dict[str, object]:
         item = record.to_dict()

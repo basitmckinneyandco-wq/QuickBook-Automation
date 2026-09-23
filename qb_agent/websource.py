@@ -88,10 +88,28 @@ class WebSourceError(RuntimeError):
     """The feed could not be fetched or made sense of."""
 
 
-# Apps Script intermittently 404s or rate-limits the redirect it issues, so a
-# first failure means "try again", not "the link is wrong".
+# Apps Script refuses this feed intermittently - measured at roughly one
+# request in two, alternating 200 and 404 on the very same link within a
+# minute. It is load-shedding a large response, not a wrong or expired link,
+# so a failure means "ask again". Five attempts turn a coin-flip into about a
+# one-in-thirty chance of the whole read failing; the previous rows stay on
+# screen either way, so patience costs nothing and a hard failure costs a
+# stale dashboard.
 RETRY_CODES = {404, 408, 429, 500, 502, 503, 504}
-ATTEMPTS = 3
+ATTEMPTS = 5
+
+
+def _http_reason(url: str, exc: "urllib.error.HTTPError") -> str:
+    """Say what a failure means, not just what code came back."""
+    if exc.code == 404 and "script.google" in url:
+        return (
+            f"Google refused the sheet {ATTEMPTS} times in a row (404). The link "
+            "is usually fine - this feed is refused intermittently when Google is "
+            "busy, and the next read normally succeeds. The rows already loaded "
+            "are still being shown. If it keeps failing for more than a few "
+            "minutes, check the sheet is still shared and published."
+        )
+    return f"The data source replied {exc.code} {exc.reason}."
 
 
 def _download(url: str, timeout: int) -> object:
@@ -110,7 +128,7 @@ def _download(url: str, timeout: int) -> object:
         except urllib.error.HTTPError as exc:
             last = exc
             if exc.code not in RETRY_CODES or attempt == ATTEMPTS:
-                raise WebSourceError(f"The data source replied {exc.code} {exc.reason}.") from exc
+                raise WebSourceError(_http_reason(url, exc)) from exc
         except urllib.error.URLError as exc:
             last = exc
             if attempt == ATTEMPTS:

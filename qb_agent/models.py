@@ -112,7 +112,7 @@ class WorkRecord:
     @property
     def quickbooks_customer_name(self) -> str:
         """The customer name QuickBooks can store; the full value goes in Notes."""
-        return _tidy_name(self.customer_name)[:MAX_CUSTOMER_NAME]
+        return _fit_name(self.customer_name, MAX_CUSTOMER_NAME)
 
     @property
     def customer_name_was_shortened(self) -> bool:
@@ -121,7 +121,9 @@ class WorkRecord:
     @property
     def quickbooks_job_name(self) -> str:
         """The Line of Business as QuickBooks will name the job."""
-        return _tidy_name(self.job_name)
+        # Same 41-character ceiling as a customer: a job is an entry on the
+        # very same list, so a long Line of Business would be rejected too.
+        return _fit_name(self.job_name, MAX_CUSTOMER_NAME)
 
     @property
     def quickbooks_job_full_name(self) -> str:
@@ -132,7 +134,7 @@ class WorkRecord:
     @property
     def quickbooks_company_name(self) -> str:
         """The company name QuickBooks can store; the full value goes in Notes."""
-        return _tidy_name(self.company_name)[:MAX_CUSTOMER_NAME]
+        return _fit_name(self.company_name, MAX_CUSTOMER_NAME)
 
     @property
     def company_name_was_shortened(self) -> bool:
@@ -375,6 +377,18 @@ def _tidy_name(value: str) -> str:
     nothing is lost by tidying what goes in the name.
     """
     return " ".join(value.replace(":", " - ").split())
+
+
+def _fit_name(value: str, limit: int) -> str:
+    """A tidy name cut to QuickBooks' length limit, without a trailing space.
+
+    Cutting at a fixed length lands mid-word as often as not, and when it lands
+    on a space the name we hold ends in one while the name QuickBooks stores
+    does not - it trims. Every later lookup then asks for a name that is one
+    character longer than the one on file, finds nothing, tries to create it
+    again and is told the name is already in use (error 3100).
+    """
+    return _tidy_name(value)[:limit].rstrip()
 
 
 def deterministic_source_id(
