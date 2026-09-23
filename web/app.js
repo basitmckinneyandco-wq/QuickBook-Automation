@@ -568,6 +568,14 @@ async function checkForChanges() {
   setLink(true, "Connected");
   const known = state.health ? state.health.revision : undefined;
   state.health = health;
+
+  // Redrawn even when the rows themselves have not changed. "Last read" and
+  // the feed's state move every minute whether or not the sheet does, and
+  // returning early left the Status page frozen at whatever it said when it
+  // was opened - which reads as the app having stopped refreshing.
+  renderHealth();
+  if (state.view === "status") renderStatus();
+
   if (health.revision === known || known === undefined) return;
 
   // Something in the sheet moved, so pull the rows and let the usual card and
@@ -2353,9 +2361,15 @@ function renderStatus() {
       return row;
     })
   );
-  // Never overwrite a link being typed.
+  // Never overwrite a link being worked on. This now runs every twenty seconds,
+  // so "not focused right now" is not enough - a pasted link left while the
+  // person reads it over would be wiped. While the panel is unlocked the box
+  // belongs to them.
   const box = $("sourceUrl");
-  if (document.activeElement !== box) box.value = health.data_source_url || "";
+  const unlocked = !document.querySelector('[data-lock="source"]').classList.contains("locked");
+  if (document.activeElement !== box && !unlocked) {
+    box.value = health.data_source_url || "";
+  }
   const note = $("sourceNote");
   note.hidden = !health.load_error;
   if (health.load_error) note.textContent = `Last read failed: ${health.load_error}`;
