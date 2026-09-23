@@ -1,4 +1,11 @@
-# The only third-party package this app needs. Everything else is in Python
-# itself. pywin32 is what lets Python talk to QuickBooks Desktop over COM, so
-# it is Windows-only - the app cannot run on Mac or Linux.
+# The two third-party packages this app needs. Everything else is in Python
+# itself.
+
+# What lets Python talk to QuickBooks Desktop over COM. Windows-only, so the
+# app cannot run on Mac or Linux.
 pywin32>=306
+
+# Signs in to Google as the service account, so the app can read the sheet and
+# write each policy's status back into it. Only needed when google_sheet is set
+# in config.json; the published-link route uses nothing but Python itself.
+google-auth>=2.30

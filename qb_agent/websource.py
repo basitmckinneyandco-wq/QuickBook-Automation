@@ -71,6 +71,9 @@ DISPLAY_FIELDS = (
     "bound_status",
     "premium", "total_premium", "mckinney_fee", "commission_rate",
     "net_due", "prem_inv", "fees_invoice", "policy_class",
+    # What another dashboard has already done with this row. Empty when the
+    # sheet has no status columns, or when nobody has sent it yet.
+    "qb_customer_job", "qb_premium", "qb_commission", "qb_fees",
 )
 
 # Only rows the agency has finished with belong in QuickBooks: the CRM column
@@ -187,7 +190,9 @@ def build_records(tab: str, rows: Sequence[Sequence[object]]) -> WebSourceResult
                 f"{FIXED_WIDTH}-column export either, so its columns cannot be identified."
             )
         header_index, columns, warnings = -1, layout, []
-        header = [f"column {index}" for index in range(FIXED_WIDTH)]
+        # As wide as the layout actually reaches: with the status columns it
+        # reads up to column 24, and a 21-long list would be indexed past its end.
+        header = [f"column {index}" for index in range(max(layout.values()) + 1)]
         # This export is narrowed to bound + done before it reaches us.
         pre_filtered = True
 
@@ -290,6 +295,19 @@ def _find_header(rows: Sequence[Sequence[object]]) -> tuple[int, list[str]]:
 # columns, so they are matched by position - which is only safe because the
 # shape is checked before it is trusted (see _fixed_layout).
 FIXED_WIDTH = 21
+
+# The same export with the four QuickBooks status columns appended, which is
+# how two people working the same sheet see each other's work: one dashboard
+# writes them, the other reads them back here. They are added at the end, so
+# every column before them keeps its meaning.
+STATUS_WIDTH = 25
+STATUS_LAYOUT = {
+    "qb_customer_job": 21,
+    "qb_premium": 22,
+    "qb_commission": 23,
+    "qb_fees": 24,
+}
+
 FIXED_LAYOUT = {
     "policy_type": 0,
     "billing": 1,
@@ -326,14 +344,21 @@ def _fixed_layout(rows: Sequence[Sequence[object]]) -> dict[str, int] | None:
     sample = [row for row in rows if any(str(cell).strip() for cell in row)][:40]
     if not sample:
         return None
-    if any(len(row) != FIXED_WIDTH for row in sample):
+    widths = {len(row) for row in sample}
+    # Two widths are recognised, and only two: the original export, and that
+    # same export with the four status columns appended. Anything else is a
+    # change nobody has verified, and is still refused.
+    if widths not in ({FIXED_WIDTH}, {STATUS_WIDTH}):
         return None
     # The corporation name and the effective date are what every row must have.
     named = sum(1 for row in sample if str(row[FIXED_LAYOUT["customer_name"]]).strip())
     dated = sum(1 for row in sample if _sheet_date(row[FIXED_LAYOUT["invoice_date"]]))
     if named < len(sample) * 0.8 or dated < len(sample) * 0.8:
         return None
-    return dict(FIXED_LAYOUT)
+    layout = dict(FIXED_LAYOUT)
+    if widths == {STATUS_WIDTH}:
+        layout.update(STATUS_LAYOUT)
+    return layout
 
 
 # The verified accounting block starts at one of these headers. Everything left

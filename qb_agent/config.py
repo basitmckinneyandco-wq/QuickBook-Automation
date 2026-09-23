@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,35 @@ class DataSourceConfig:
     @property
     def enabled(self) -> bool:
         return bool(self.url.strip())
+
+
+@dataclass(frozen=True, slots=True)
+class GoogleSheetConfig:
+    """Reading and writing the sheet directly, as a service account.
+
+    When this is set it replaces the published Apps Script link: it answers in
+    a couple of seconds rather than most of a minute, it does not refuse half
+    the requests, and it can write back - which is what lets one dashboard
+    show what another has already done.
+    """
+
+    key_file: str
+    spreadsheet_id: str
+    # The tab shown in the dashboard -> the tab's real name in the spreadsheet.
+    tabs: tuple[tuple[str, str], ...] = ()
+    # False leaves the sheet read-only, which is the safe way to try it out.
+    write_status: bool = True
+    # False reads the rows from the published link as before, and uses this
+    # connection only to write statuses back.
+    read_rows: bool = True
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.spreadsheet_id.strip() and self.key_file.strip())
+
+    @property
+    def tab_titles(self) -> dict[str, str]:
+        return dict(self.tabs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +88,10 @@ class AppConfig:
     fees: InvoiceKindConfig
     company: CompanyConfig
     data_source: DataSourceConfig
+    # Optional: without it the app reads the published Apps Script link instead.
+    google_sheet: GoogleSheetConfig = field(
+        default_factory=lambda: GoogleSheetConfig(key_file="", spreadsheet_id="")
+    )
     # Where this came from, so the app can write a change back to the same file.
     source_path: str = ""
 
@@ -92,6 +125,23 @@ def _invoice_kind(raw: Any) -> InvoiceKindConfig:
         ar_account=str(settings.get("ar_account", "")),
         item=str(settings.get("item", "")),
         item_income_account=str(settings.get("item_income_account", "")),
+    )
+
+
+def _google_sheet(raw: Any, config_path: Path) -> GoogleSheetConfig:
+    settings = raw if isinstance(raw, dict) else {}
+    key_file = str(settings.get("key_file", "service-account.json"))
+    # Kept beside the settings file unless an absolute path is given, so the
+    # folder can be copied to another machine without editing anything.
+    if key_file and not Path(key_file).is_absolute():
+        key_file = str(config_path.resolve().parent / key_file)
+    tabs = settings.get("tabs", {})
+    return GoogleSheetConfig(
+        key_file=key_file,
+        spreadsheet_id=str(settings.get("spreadsheet_id", "")),
+        tabs=tuple((str(k), str(v)) for k, v in tabs.items()) if isinstance(tabs, dict) else (),
+        write_status=bool(settings.get("write_status", True)),
+        read_rows=bool(settings.get("read_rows", True)),
     )
 
 
@@ -133,6 +183,7 @@ def load_config(filename: str | Path) -> AppConfig:
             url=str(raw.get("data_source", {}).get("url", "")),
             default_tab=str(raw.get("data_source", {}).get("default_tab", "")),
         ),
+        google_sheet=_google_sheet(raw.get("google_sheet", {}), path),
         source_path=str(path.resolve()),
     )
 

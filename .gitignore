@@ -3,6 +3,14 @@
 config.json
 config-*.json
 
+# The Google service account's private key. This is a password: anyone holding
+# it can read and write every sheet the account can reach. It never goes into
+# git, and never into the zip that is sent to other machines.
+service-account.json
+*service*account*.json
+*-key.json
+credentials.json
+
 # Every history database - these hold real customer and policy records.
 *.db
 

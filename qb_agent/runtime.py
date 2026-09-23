@@ -11,6 +11,7 @@ from typing import Mapping
 
 from .config import AppConfig, database_for, load_config, save_company, save_data_source
 from .edits import EditError, apply, apply_all
+from .gsheets import Sheets, SheetsError, column_letter, status_columns
 from .models import INVOICE_KINDS, Operation, WorkRecord
 from .processor import Processor
 from .quickbooks import (
@@ -36,6 +37,10 @@ CACHE_SECONDS = 300
 # Sheets turn up on the dashboard without anyone pressing Refresh.
 WATCH_SECONDS = 60
 
+# How long the policy -> sheet row index stays usable. Only built when the rows
+# arrive through the published link, which does not carry real row numbers.
+LOOKUP_SECONDS = 300
+
 
 class Runtime:
     def __init__(self, config: AppConfig):
@@ -49,6 +54,8 @@ class Runtime:
         self.active_tab = ""
         self.loading = False
         self.load_error = ""
+        # Why the last attempt to write a status into the sheet failed, if it did.
+        self.sheet_write_error = ""
         self._cache: dict[str, list[list[object]]] | None = None
         self._cached_at = 0.0
         # How long the feed last took to answer, so the watcher can pace itself
@@ -72,6 +79,15 @@ class Runtime:
         self._lock = Lock()
         # Separate from the app lock: it serialises downloads only.
         self._fetch_lock = Lock()
+        # Signed in once and kept, rather than per read.
+        self._sheets_client: Sheets | None = None
+        # tab label -> {field: column index} for the four status columns, found
+        # from each tab's header when it is read.
+        self._status_columns: dict[str, dict[str, int]] = {}
+        # tab label -> {policy key: real sheet row}, built only when the rows
+        # come from the published link and so carry no true row number.
+        self._row_index: dict[str, dict[tuple[str, str, str], int]] = {}
+        self._lookup_at = 0.0
 
     def _gateway(self):
         if self.config.mode == "quickbooks":
@@ -273,8 +289,8 @@ class Runtime:
 
     def fetch_web(self, tab: str = "", force: bool = False) -> dict[str, object]:
         """Pull the feed and load EVERY tab into one combined list of rows."""
-        if not self.config.data_source.enabled:
-            raise WebSourceError("No data source URL is set in config.json.")
+        if not (self.config.google_sheet.enabled or self.config.data_source.enabled):
+            raise WebSourceError("No Google Sheet is configured in config.json.")
         # Deliberately outside the lock. Google takes the best part of a minute
         # to answer, and the watcher asks every minute, so holding the lock
         # across the download left almost no gap for an edit or a send to get
@@ -344,11 +360,61 @@ class Runtime:
             fresh = self._cache is not None and (monotonic() - self._cached_at) < CACHE_SECONDS
             if force or not fresh:
                 started = monotonic()
-                self._cache = fetch_tabs(self.config.data_source.url)
+                settings = self.config.google_sheet
+                self._cache = (
+                    self._read_sheet()
+                    if settings.enabled and settings.read_rows
+                    else fetch_tabs(self.config.data_source.url)
+                )
                 self._cached_at = monotonic()
                 self._fetch_seconds = self._cached_at - started
             assert self._cache is not None
             return self._cache
+
+    def _read_sheet(self) -> dict[str, list[list[object]]]:
+        """Read the tabs straight from the spreadsheet, as the service account.
+
+        Each tab comes back whole and unfiltered, so a row's position in the
+        list is its real position in the sheet - which is what makes writing a
+        status back to the right row possible at all.
+        """
+        settings = self.config.google_sheet
+        sheets = self._sheets()
+        wanted = settings.tab_titles
+        if not wanted:
+            raise WebSourceError(
+                "No tabs are listed under google_sheet in config.json, so there "
+                "is nothing to read."
+            )
+        grids: dict[str, list[list[object]]] = {}
+        missing: list[str] = []
+        available = None
+        for label, title in wanted.items():
+            try:
+                grid = sheets.read(title)
+                grids[label] = grid
+                # Where this tab keeps its four status columns. Found per tab,
+                # because the two pipelines are a column out from each other.
+                self._status_columns[label] = status_columns(grid)
+            except SheetsError as exc:
+                if available is None:
+                    available = sheets.tab_titles()
+                if title not in available:
+                    missing.append(title)
+                    continue
+                raise WebSourceError(str(exc)) from exc
+        if missing:
+            raise WebSourceError(
+                "These tabs are not in the spreadsheet: " + ", ".join(missing)
+            )
+        return grids
+
+    def _sheets(self) -> Sheets:
+        """One client per spreadsheet, so the sign-in is not repeated each minute."""
+        settings = self.config.google_sheet
+        if self._sheets_client is None or self._sheets_client.spreadsheet_id != settings.spreadsheet_id:
+            self._sheets_client = Sheets(settings.key_file, settings.spreadsheet_id)
+        return self._sheets_client
 
     def edit(self, source_id: str, values: Mapping[str, str]) -> dict[str, object]:
         """Correct one or more fields of a row, and remember the corrections.
@@ -379,7 +445,14 @@ class Runtime:
             if record is None:
                 raise ValueError("That policy is no longer loaded. Refresh and try again.")
             self.store.set_invoice_needed(source_id, self.config.mode, kind, needed)
-            return self._record_payload(record)
+            payload = self._record_payload(record)
+        # Outside the lock, and never fatal: the mark is saved either way.
+        self._publish_status([{
+            "source_id": source_id,
+            "operation": f"{kind}_invoice",
+            "status": "ready" if needed else "not_needed",
+        }])
+        return payload
 
     def edit_many(
         self, source_ids: list[str], values: Mapping[str, str]
@@ -560,9 +633,119 @@ class Runtime:
                 ]
             finally:
                 self._progress = {"active": False}
-            return results + unknown
         finally:
             self._lock.release()
+
+        # Outside the lock: writing to the sheet is network work, and must not
+        # hold up an edit or the next send. A sheet that cannot be written is
+        # reported but never fails the batch - the work in QuickBooks is done
+        # either way, and the sheet is only how the other dashboard hears of it.
+        self._publish_status(results)
+        return results + unknown
+
+    # ── telling the sheet what happened ─────────────────────────────────
+
+    # Which column each operation reports into.
+    _STATUS_FIELD = {
+        "create_customer": "qb_customer_job",
+        "update_customer": "qb_customer_job",
+        "create_invoice": "qb_customer_job",
+        "premium_invoice": "qb_premium",
+        "commission_invoice": "qb_commission",
+        "fees_invoice": "qb_fees",
+    }
+    # What the sheet says. "Already there" is written as Created on purpose:
+    # a reader of the sheet only needs to know the work is done, not who did it.
+    _STATUS_WORD = {
+        "completed": "Created",
+        "already_exists": "Created",
+        "needs_review": "Needs review",
+        "failed": "Failed",
+        "not_needed": "Not needed",
+        "ready": "Pending",
+    }
+
+    def _publish_status(self, results: list[dict[str, object]]) -> None:
+        """Write each result into its row's status column in the sheet."""
+        settings = self.config.google_sheet
+        if not (settings.enabled and settings.write_status and results):
+            return
+        updates: list[tuple[str, str]] = []
+        for item in results:
+            cell = self._status_cell(
+                str(item.get("source_id", "")), str(item.get("operation", ""))
+            )
+            word = self._STATUS_WORD.get(str(item.get("status", "")))
+            if cell and word:
+                updates.append((cell, word))
+        if not updates:
+            return
+        try:
+            self._sheets().write(updates)
+        except SheetsError as exc:
+            self.sheet_write_error = str(exc)
+        else:
+            self.sheet_write_error = ""
+
+    def _status_cell(self, source_id: str, operation: str) -> str:
+        """The A1 address of one row's status column, or "" if it cannot be found."""
+        record = self.records.get(source_id)
+        field = self._STATUS_FIELD.get(operation)
+        if record is None or not field:
+            return ""
+        row = self._sheet_row(record)
+        columns = self._status_columns.get(record.source_tab, {})
+        index = columns.get(field)
+        title = self.config.google_sheet.tab_titles.get(record.source_tab, "")
+        if row < 1 or index is None or not title:
+            return ""
+        return f"'{title}'!{column_letter(index)}{row}"
+
+    def _sheet_row(self, record: WorkRecord) -> int:
+        """Which row of the real spreadsheet this policy is.
+
+        Read straight from the sheet, the row number is already true. Read
+        through the published link it is not: that export is filtered before it
+        arrives, so its fifth row may be the sheet's hundredth. The policy is
+        then found by what identifies it - corporation, policy number and
+        effective date - and a key that matches more than one row is refused
+        rather than guessed at, because writing to the wrong row is worse than
+        not writing at all.
+        """
+        if self.config.google_sheet.read_rows:
+            return record.row_number
+        return self._row_lookup(record.source_tab).get(_policy_key(record), 0)
+
+    def _row_lookup(self, label: str) -> dict[tuple[str, str, str], int]:
+        """Policy -> real sheet row, for one tab. Built from the sheet, and cached."""
+        fresh = (monotonic() - self._lookup_at) < LOOKUP_SECONDS
+        if fresh and label in self._row_index:
+            return self._row_index[label]
+        title = self.config.google_sheet.tab_titles.get(label, "")
+        if not title:
+            return {}
+        try:
+            grid = self._sheets().read(title)
+        except SheetsError as exc:
+            self.sheet_write_error = str(exc)
+            return {}
+        self._status_columns[label] = status_columns(grid)
+        try:
+            found = build_records(label, grid)
+        except WebSourceError:
+            return {}
+        seen: dict[tuple[str, str, str], int] = {}
+        ambiguous: set[tuple[str, str, str]] = set()
+        for entry in found.records:
+            key = _policy_key(entry)
+            if key in seen:
+                ambiguous.add(key)
+            seen[key] = entry.row_number
+        for key in ambiguous:
+            seen.pop(key, None)      # two rows look the same; write to neither
+        self._row_index[label] = seen
+        self._lookup_at = monotonic()
+        return seen
 
     def _take_lock(self, seconds: float) -> None:
         """Wait a while for the app to be free, then explain who is holding it.
@@ -779,6 +962,15 @@ class Runtime:
     def progress(self) -> dict[str, object]:
         """What the batch in flight has finished so far, and what is next."""
         return dict(self._progress)
+
+
+def _policy_key(record: WorkRecord) -> tuple[str, str, str]:
+    """What identifies one policy row well enough to find it in the sheet."""
+    return (
+        record.customer_name.strip().casefold(),
+        record.invoice_number.strip().casefold(),
+        record.invoice_date.isoformat() if record.invoice_date else "",
+    )
 
 
 def _key(path: str) -> str:
