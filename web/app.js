@@ -113,6 +113,7 @@ const EXTRA_COLUMNS = [
         badge.title = view.detail;
         badge.append(document.createTextNode(" ⓘ"));
       }
+      if (record.status_elsewhere) markFromSheet(badge);
       cell.append(badge);
 
       // Inline actions: act on this one policy without selecting it first.
@@ -160,6 +161,10 @@ const EXTRA_COLUMNS = [
           badge.title = detail;
           badge.append(document.createTextNode(" ⓘ"));
         }
+        // Done on someone else's dashboard, and read back from the sheet. Worth
+        // marking: this machine has no History entry for it, and without the
+        // mark that looks like a fault rather than someone else's work.
+        if (record[`${kind.key}_elsewhere`]) markFromSheet(badge);
         cell.append(badge);
       }
 
@@ -210,6 +215,19 @@ function batchBadge(sourceId, column) {
   }
   if (state.queued.has(sourceId)) return tag("Queued", "queued");
   return null;
+}
+
+/** Mark a badge as something another dashboard did, read back from the sheet. */
+function markFromSheet(badge) {
+  badge.classList.add("from-sheet");
+  const said = badge.title ? `${badge.title}  ` : "";
+  badge.title = `${said}Done on another computer — read from the Google Sheet, `
+              + `so this machine has no History entry for it.`;
+  const mark = document.createElement("span");
+  mark.className = "sheet-mark";
+  mark.textContent = "↗";
+  mark.setAttribute("aria-label", "from the sheet");
+  badge.append(mark);
 }
 
 /** Which column the running batch belongs to: "customer", "invoice" or "". */

@@ -1160,6 +1160,11 @@ td[data-key="__invoice"] .tag { display: block; margin-bottom: 3px; text-align: 
   .sheet-grid tbody tr.row-leaving { animation: none; opacity: 0; }
 }
 
+/* A status another dashboard set, read back from the sheet. Deliberately
+   quiet - the status itself is the news; this only says where it came from. */
+.tag.from-sheet { border: 1px dashed currentColor; }
+.sheet-mark { margin-left: 4px; opacity: .65; font-weight: 700; }
+
 /* A log entry arriving while the work runs. Only new ones carry this class,
    so the rest of the list stays still underneath. */
 .log.just-in, .act.just-in { animation: log-arrive .42s cubic-bezier(.2, .7, .3, 1); }

@@ -172,30 +172,72 @@ class Runtime:
     def _state_payload(
         self, record: WorkRecord, state, invoices: dict[str, object] | None = None
     ) -> dict[str, object]:
-        """The customer status and each invoice's status, side by side."""
+        """The customer status and each invoice's status, side by side.
+
+        Three things can know what happened to a row, in this order:
+
+        1. This machine's own history - it did the work and holds the
+           QuickBooks ids, so it is always believed first.
+        2. The sheet's status columns - another machine did the work and said
+           so there. This is how two people see each other's queue.
+        3. Nothing at all, in which case the row is pending, or needs review
+           when something on it is missing.
+        """
         item: dict[str, object] = {}
+        elsewhere = self._sheet_says(record)
+
         if state is not None and state.status:
             item["status"] = state.status
             item["customer_list_id"] = state.customer_list_id
             item["job_list_id"] = state.job_list_id
             item["invoice_txn_id"] = state.invoice_txn_id
             item["error_message"] = state.error_message
+        elif elsewhere.get("qb_customer_job"):
+            item["status"] = elsewhere["qb_customer_job"]
+            item["status_elsewhere"] = True
         else:
             item["status"] = "review" if record.review_reasons() else "ready"
 
         held = invoices or {}
         for kind in INVOICE_KINDS.values():
             saved = held.get(kind)
+            from_sheet = elsewhere.get(f"qb_{kind}")
             if saved is not None and saved.status:
                 item[f"{kind}_status"] = saved.status
                 item[f"{kind}_txn_id"] = saved.txn_id
                 item[f"{kind}_ref_number"] = saved.ref_number
                 item[f"{kind}_error"] = saved.error_message
+            elif from_sheet:
+                item[f"{kind}_status"] = from_sheet
+                item[f"{kind}_elsewhere"] = True
             else:
                 item[f"{kind}_status"] = (
                     "review" if record.invoice_reasons(kind) else "ready"
                 )
         return item
+
+    # What the sheet's own words mean here. Anything else - a blank cell, or
+    # "Pending" - says nothing, and the row is judged on its own merits.
+    _SHEET_STATUS = {
+        "created": "completed",
+        "already there": "completed",
+        "failed": "failed",
+        "needs review": "needs_review",
+        "not needed": "not_needed",
+    }
+
+    def _sheet_says(self, record: WorkRecord) -> dict[str, str]:
+        """What the sheet's four columns claim about this row, if anything."""
+        extra = dict(record.extra)
+        found: dict[str, str] = {}
+        for field in ("qb_customer_job", "qb_premium", "qb_commission", "qb_fees"):
+            # Values arrive from a dropdown and are sometimes pasted, so a
+            # stray tab or trailing space is normal and must not stop a match.
+            word = str(extra.get(field, "")).strip().casefold()
+            status = self._SHEET_STATUS.get(word)
+            if status:
+                found[field] = status
+        return found
 
     def activity(self, limit: int = 200) -> list[dict[str, object]]:
         return [
