@@ -229,8 +229,12 @@ class Runtime:
             from_sheet = elsewhere.get(f"qb_{kind}")
             if from_sheet == _RESET:
                 # Same as above: an invoice with a transaction id in QuickBooks
-                # is not un-created by a cell that has yet to catch up.
-                if saved is None or not saved.txn_id:
+                # is not un-created by a cell that has yet to catch up. Nor is
+                # "not needed" undone by one - that is a decision somebody made
+                # here, and the cell saying Pending usually just means it was
+                # read before the decision reached it.
+                keep = saved is not None and (saved.txn_id or saved.status == "not_needed")
+                if not keep:
                     saved = None
                 from_sheet = ""
             if saved is not None:
@@ -535,14 +539,21 @@ class Runtime:
             if record is None:
                 raise ValueError("That policy is no longer loaded. Refresh and try again.")
             self.store.set_invoice_needed(source_id, self.config.mode, kind, needed)
-            payload = self._record_payload(record)
+
+        # Told to the sheet before the answer is built, not after. The row in
+        # memory still holds whatever the sheet said when it was last read, and
+        # an answer worked out from that stale word reports the state before
+        # the click - so the button appeared to do nothing until the next
+        # minute's read caught up.
         # Outside the lock, and never fatal: the mark is saved either way.
         self._publish_status([{
             "source_id": source_id,
             "operation": f"{kind}_invoice",
             "status": "ready" if needed else "not_needed",
         }])
-        return payload
+        with self._lock:
+            record = self.records.get(source_id)
+            return self._record_payload(record) if record is not None else {}
 
     def edit_many(
         self, source_ids: list[str], values: Mapping[str, str]
