@@ -174,27 +174,36 @@ class Runtime:
     ) -> dict[str, object]:
         """The customer status and each invoice's status, side by side.
 
-        Three things can know what happened to a row, in this order:
+        The sheet has the last word. It is what every dashboard can see, so a
+        status written there - by this app or by a person - is what everybody
+        shows. Setting a cell back to Pending is therefore a way of saying
+        "do this one again", and it is obeyed.
 
-        1. This machine's own history - it did the work and holds the
-           QuickBooks ids, so it is always believed first.
-        2. The sheet's status columns - another machine did the work and said
-           so there. This is how two people see each other's queue.
-        3. Nothing at all, in which case the row is pending, or needs review
-           when something on it is missing.
+        Where the sheet says nothing, this machine's own history answers, and
+        where that says nothing either the row is judged on its own merits.
+
+        Nothing is duplicated by obeying the sheet: QuickBooks is still asked
+        whether the customer, job and invoice exist before anything is created,
+        so a row wrongly set back to Pending is re-sent and comes back
+        "already there" rather than creating a second copy.
         """
         item: dict[str, object] = {}
         elsewhere = self._sheet_says(record)
 
-        if state is not None and state.status:
-            item["status"] = state.status
+        # The QuickBooks ids are facts this machine learned by doing the work,
+        # so they are kept whatever the sheet says about the status.
+        if state is not None:
             item["customer_list_id"] = state.customer_list_id
             item["job_list_id"] = state.job_list_id
             item["invoice_txn_id"] = state.invoice_txn_id
             item["error_message"] = state.error_message
-        elif elsewhere.get("qb_customer_job"):
-            item["status"] = elsewhere["qb_customer_job"]
+
+        said = elsewhere.get("qb_customer_job")
+        if said:
+            item["status"] = said
             item["status_elsewhere"] = True
+        elif state is not None and state.status:
+            item["status"] = state.status
         else:
             item["status"] = "review" if record.review_reasons() else "ready"
 
@@ -202,28 +211,30 @@ class Runtime:
         for kind in INVOICE_KINDS.values():
             saved = held.get(kind)
             from_sheet = elsewhere.get(f"qb_{kind}")
-            if saved is not None and saved.status:
-                item[f"{kind}_status"] = saved.status
+            if saved is not None:
                 item[f"{kind}_txn_id"] = saved.txn_id
                 item[f"{kind}_ref_number"] = saved.ref_number
                 item[f"{kind}_error"] = saved.error_message
-            elif from_sheet:
+            if from_sheet:
                 item[f"{kind}_status"] = from_sheet
                 item[f"{kind}_elsewhere"] = True
+            elif saved is not None and saved.status:
+                item[f"{kind}_status"] = saved.status
             else:
                 item[f"{kind}_status"] = (
                     "review" if record.invoice_reasons(kind) else "ready"
                 )
         return item
 
-    # What the sheet's own words mean here. Anything else - a blank cell, or
-    # "Pending" - says nothing, and the row is judged on its own merits.
+    # What each word in the sheet means here. A blank cell means the sheet has
+    # nothing to say; every other value is taken at its word, Pending included.
     _SHEET_STATUS = {
         "created": "completed",
         "already there": "completed",
         "failed": "failed",
         "needs review": "needs_review",
         "not needed": "not_needed",
+        "pending": "ready",
     }
 
     def _sheet_says(self, record: WorkRecord) -> dict[str, str]:
@@ -308,6 +319,12 @@ class Runtime:
                     print(
                         f"Sheet changed - now {len(self.records)} policies.", flush=True
                     )
+                # Having just read the sheet, put back anything it does not yet
+                # know. Only differences are written, so a settled sheet costs
+                # nothing at all.
+                done = self.sync_sheet()
+                if done.get("written"):
+                    print(f"Sheet updated: {done['written']} cells.", flush=True)
             except Exception as exc:
                 # A blip in the feed must not kill the watcher; it tries again.
                 self.load_error = str(exc)
@@ -707,6 +724,80 @@ class Runtime:
         "ready": "Pending",
     }
 
+    # The word this app writes for each status it can show.
+    _SHEET_WORD = {
+        "completed": "Created",
+        "already_exists": "Created",
+        "needs_review": "Needs review",
+        "review": "Needs review",
+        "failed": "Failed",
+        "not_needed": "Not needed",
+        "ready": "Pending",
+    }
+    _SHEET_FIELDS = (
+        ("status", "qb_customer_job"),
+        ("premium_status", "qb_premium"),
+        ("commission_status", "qb_commission"),
+        ("fees_status", "qb_fees"),
+    )
+
+    def sync_sheet(self, limit: int = 4000) -> dict[str, object]:
+        """Make the sheet say what the dashboard says, for every loaded row.
+
+        Only cells that differ are written. Everything the dashboard shows is
+        already derived from the sheet where the sheet has an opinion, so a
+        second run has nothing left to do - there is no tug of war between the
+        two, and no write when nothing has changed.
+        """
+        settings = self.config.google_sheet
+        if not (settings.enabled and settings.write_status):
+            return {"written": 0, "reason": "Writing to the sheet is switched off."}
+
+        with self._lock:
+            states = self.store.states_for(list(self.records), self.config.mode)
+            invoices = self.store.invoice_states(list(self.records), self.config.mode)
+            rows = list(self.records.values())
+
+        updates: list[tuple[str, str]] = []
+        unplaced = 0
+        for record in rows:
+            state = states.get(record.source_id)
+            if _is_obsolete_name_limit_review(state):
+                state = None
+            shown = self._state_payload(record, state, invoices.get(record.source_id, {}))
+            held = dict(record.extra)
+            for field, column in self._SHEET_FIELDS:
+                word = self._SHEET_WORD.get(str(shown.get(field, "")), "")
+                if not word or str(held.get(column, "")).strip() == word:
+                    continue                      # nothing to say, or already says it
+                cell = self._cell_for(record, column)
+                if not cell:
+                    unplaced += 1
+                    continue
+                updates.append((cell, word))
+            if len(updates) >= limit:
+                break
+
+        written = 0
+        try:
+            # Google counts requests, not cells, so this goes in as few as possible.
+            for start in range(0, len(updates), 500):
+                written += self._sheets().write(updates[start:start + 500])
+        except SheetsError as exc:
+            self.sheet_write_error = str(exc)
+            return {"written": written, "error": str(exc)}
+        self.sheet_write_error = ""
+        return {"written": written, "rows": len(rows), "unplaced": unplaced}
+
+    def _cell_for(self, record: WorkRecord, column: str) -> str:
+        """The A1 address of one status column on one policy's row."""
+        row = self._sheet_row(record)
+        index = self._status_columns.get(record.source_tab, {}).get(column)
+        title = self.config.google_sheet.tab_titles.get(record.source_tab, "")
+        if row < 1 or index is None or not title:
+            return ""
+        return f"'{title}'!{column_letter(index)}{row}"
+
     def _publish_status(self, results: list[dict[str, object]]) -> None:
         """Write each result into its row's status column in the sheet."""
         settings = self.config.google_sheet
@@ -735,13 +826,7 @@ class Runtime:
         field = self._STATUS_FIELD.get(operation)
         if record is None or not field:
             return ""
-        row = self._sheet_row(record)
-        columns = self._status_columns.get(record.source_tab, {})
-        index = columns.get(field)
-        title = self.config.google_sheet.tab_titles.get(record.source_tab, "")
-        if row < 1 or index is None or not title:
-            return ""
-        return f"'{title}'!{column_letter(index)}{row}"
+        return self._cell_for(record, field)
 
     def _sheet_row(self, record: WorkRecord) -> int:
         """Which row of the real spreadsheet this policy is.
