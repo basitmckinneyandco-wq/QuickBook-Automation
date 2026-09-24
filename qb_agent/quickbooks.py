@@ -165,18 +165,18 @@ class RequestProcessorTransport(AbstractContextManager["RequestProcessorTranspor
     def _begin_session(self):
         """Attach to the company file QuickBooks already has open.
 
-        Naming the file explicitly tells QuickBooks to *start* that file, which
-        it refuses to do when it is already running with it open ("Could not
-        start QuickBooks"). So we ask for whatever is open, and only name the
-        file as a fallback - that path is what launches QuickBooks when it is
-        closed. Either way the caller then checks it got the right company.
+        Only ever to the open one. Naming the file instead asks QuickBooks to
+        *start* it, and that was worth avoiding on two counts: with QuickBooks
+        already running it fails anyway ("Could not start QuickBooks"), and
+        with QuickBooks closed the launch has been seen to bring QuickBooks
+        down with an Unrecoverable Error - taking a minute to do it, and
+        leaving the row that asked for it stuck on "Creating..." all the while.
+
+        So this asks for whatever is open and stops there. Failing in a second
+        with "open QuickBooks first" is better than a slow crash, and the app
+        is used with QuickBooks already open regardless.
         """
-        try:
-            return self._processor.BeginSession("", self.FILE_OPEN_DO_NOT_CARE)
-        except Exception:
-            if not self.company_file:
-                raise
-            return self._processor.BeginSession(self.company_file, self.FILE_OPEN_DO_NOT_CARE)
+        return self._processor.BeginSession("", self.FILE_OPEN_DO_NOT_CARE)
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         if self._processor is not None and self._ticket is not None:
@@ -763,6 +763,10 @@ def ui_blockers() -> dict[str, object]:
     )
     return {
         "checked": bool(titles),          # false when the window list is unreadable
+        # No QuickBooks window at all. Worth its own answer: a send then has
+        # nothing to attach to, and asking QuickBooks to start itself is what
+        # brought it down with an Unrecoverable Error.
+        "running": bool(main),
         "open_company": open_company,
         "customer_centre": centre,
         "dialog": dialog,

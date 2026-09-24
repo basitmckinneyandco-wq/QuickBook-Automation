@@ -3323,6 +3323,20 @@ async function quickBooksIsReady() {
   } catch {
     return true;   // cannot check, so do not stand in the way
   }
+  // Nothing to send to. Caught here rather than let the attempt go through:
+  // with QuickBooks closed the app used to ask it to start itself, which took
+  // a minute and could bring QuickBooks down with an Unrecoverable Error.
+  if (ui.checked && !ui.running) {
+    await ask({
+      title: "QuickBooks is not open",
+      sub: "Open QuickBooks Desktop with your company file, then send again.",
+      note: "The app works inside the QuickBooks you have open — it cannot "
+          + "start it for you.",
+      ok: "I'll open it",
+      tone: "danger",
+    });
+    return false;
+  }
   if (!ui.checked || ui.safe_to_send) return true;
 
   if (ui.dialog) {
