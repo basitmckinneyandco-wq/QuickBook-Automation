@@ -205,14 +205,16 @@ class Runtime:
 
         said = elsewhere.get("qb_customer_job")
         if said == _RESET:
-            # "Pending" asks for the row to be judged again - but it cannot
-            # erase proof. A QuickBooks id is something this machine learned by
-            # doing the work, while the cell may simply be a stale copy: the
-            # published feed lags behind by a minute or more, so a send can be
-            # followed by a read that still says Pending. Honouring that would
-            # make a finished row look unsent until the feed caught up.
-            if state is None or not (state.customer_list_id or state.job_list_id):
-                state = None
+            # "Pending" is somebody saying this one still needs doing, and it
+            # wins outright - including over this machine's own record of
+            # having done it. That is the point of the column: a second person,
+            # or a second company, can put a row back in the queue.
+            #
+            # It is only safe to obey because the sheet is read directly. Read
+            # through the published link, which lags a minute behind, a send
+            # would be followed by a read that still said Pending and would
+            # undo itself.
+            state = None
             said = ""
         if said:
             item["status"] = said
@@ -228,14 +230,7 @@ class Runtime:
             saved = held.get(kind)
             from_sheet = elsewhere.get(f"qb_{kind}")
             if from_sheet == _RESET:
-                # Same as above: an invoice with a transaction id in QuickBooks
-                # is not un-created by a cell that has yet to catch up. Nor is
-                # "not needed" undone by one - that is a decision somebody made
-                # here, and the cell saying Pending usually just means it was
-                # read before the decision reached it.
-                keep = saved is not None and (saved.txn_id or saved.status == "not_needed")
-                if not keep:
-                    saved = None
+                saved = None        # same as above: Pending puts it back in the queue
                 from_sheet = ""
             if saved is not None:
                 item[f"{kind}_txn_id"] = saved.txn_id
