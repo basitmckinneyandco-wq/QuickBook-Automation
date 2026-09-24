@@ -264,6 +264,7 @@ def serve(
         raise
     runtime.start_prefetch()  # begin downloading the sheet while the page loads
     runtime.start_watching()  # then keep re-reading it, so new rows turn up on their own
+    runtime.start_status_watch()  # and the four status columns, far more often
     url = f"http://{host}:{port}"
     health = runtime.health()
     print(f"\n  QuickBooks automation dashboard: {url}")

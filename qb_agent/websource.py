@@ -63,6 +63,13 @@ FIELDS: dict[str, tuple[str, ...]] = {
     "fees_invoice": ("fees invoce", "fees invoice", "fee invoice"),
     "policy_class": ("class", "classs"),
     "carrier_type": ("carrier type",),
+    # What a dashboard has already done with the row. Read as well as written:
+    # this is how one machine sees another's work. Without these the columns
+    # exist in the sheet but arrive empty, and a read would quietly wipe them.
+    "qb_customer_job": ("qb customer/job", "qb customer job"),
+    "qb_premium": ("qb premium",),
+    "qb_commission": ("qb commission",),
+    "qb_fees": ("qb fees",),
 }
 
 # Columns shown in the dashboard but never sent to QuickBooks.

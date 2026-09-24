@@ -46,6 +46,13 @@ LOOKUP_SECONDS = 300
 # instruction to forget what this machine thinks it did and judge the row again.
 _RESET = "__reset__"
 
+# The four columns a dashboard writes, as the rows carry them.
+STATUS_FIELDS = ("qb_customer_job", "qb_premium", "qb_commission", "qb_fees")
+
+# How often those columns are re-read straight from the sheet. Cheap - a couple
+# of seconds - so it can run far more often than the row feed.
+STATUS_WATCH_SECONDS = 45
+
 
 class Runtime:
     def __init__(self, config: AppConfig):
@@ -333,6 +340,30 @@ class Runtime:
             return
         self._watching = True
         Thread(target=self._watch, daemon=True).start()
+
+    def start_status_watch(self) -> None:
+        """Keep the four status columns current, whatever the row feed is doing."""
+        settings = self.config.google_sheet
+        if not settings.enabled or settings.read_rows:
+            return          # reading the sheet directly already does this
+        Thread(target=self._watch_statuses, daemon=True).start()
+
+    def _watch_statuses(self) -> None:
+        """A minute apart, and quick: one read of each tab, two seconds or so.
+
+        Kept separate from the row watcher on purpose. That one goes through
+        the published link, which has been measured at well over two minutes
+        and fails about half the time - far too slow for someone watching to
+        see a colleague's work appear.
+        """
+        while True:
+            sleep(STATUS_WATCH_SECONDS)
+            try:
+                changed = self.refresh_statuses()
+                if changed:
+                    print(f"Statuses read from the sheet: {changed} changed.", flush=True)
+            except Exception as exc:
+                self.sheet_write_error = str(exc)
 
     def _watch(self) -> None:
         while True:
@@ -897,12 +928,47 @@ class Runtime:
         """
         if self.config.google_sheet.read_rows:
             return record.row_number
-        return self._row_lookup(record.source_tab).get(_policy_key(record), 0)
+        found = self._row_lookup(record.source_tab).get(_policy_key(record))
+        return found[0] if found else 0
 
-    def _row_lookup(self, label: str) -> dict[tuple[str, str, str], int]:
-        """Policy -> real sheet row, for one tab. Built from the sheet, and cached."""
+    def refresh_statuses(self) -> int:
+        """Re-read just the four status columns, straight from the sheet.
+
+        The published link carries them too, but it answers in a minute or
+        three and fails often, so a status someone typed could sit unseen for
+        that long. The sheet itself answers in a couple of seconds. The rows
+        still come from the link - only what has been done to them is taken
+        from here, which is the part that changes while people work.
+        """
+        settings = self.config.google_sheet
+        if not settings.enabled or settings.read_rows:
+            return 0        # reading the sheet directly is already this fresh
+        changed = 0
+        for label in settings.tab_titles:
+            index = self._row_lookup(label, force=True)
+            if not index:
+                continue
+            for record in list(self.records.values()):
+                if record.source_tab != label:
+                    continue
+                found = index.get(_policy_key(record))
+                said = found[1] if found else {}
+                for column, word in said.items():
+                    if str(dict(record.extra).get(column, "")).strip() != word:
+                        self._remember(record.source_id, column, word)
+                        changed += 1
+        return changed
+
+    def _row_lookup(
+        self, label: str, force: bool = False
+    ) -> dict[tuple[str, str, str], tuple[int, dict[str, str]]]:
+        """Policy -> (real sheet row, its four statuses), for one tab.
+
+        One read of the tab answers both questions, so the statuses come along
+        for free with the row numbers.
+        """
         fresh = (monotonic() - self._lookup_at) < LOOKUP_SECONDS
-        if fresh and label in self._row_index:
+        if not force and fresh and label in self._row_index:
             return self._row_index[label]
         title = self.config.google_sheet.tab_titles.get(label, "")
         if not title:
@@ -917,13 +983,17 @@ class Runtime:
             found = build_records(label, grid)
         except WebSourceError:
             return {}
-        seen: dict[tuple[str, str, str], int] = {}
+        seen: dict[tuple[str, str, str], tuple[int, dict[str, str]]] = {}
         ambiguous: set[tuple[str, str, str]] = set()
         for entry in found.records:
             key = _policy_key(entry)
             if key in seen:
                 ambiguous.add(key)
-            seen[key] = entry.row_number
+            held = dict(entry.extra)
+            seen[key] = (
+                entry.row_number,
+                {field: str(held.get(field, "")).strip() for field in STATUS_FIELDS},
+            )
         for key in ambiguous:
             seen.pop(key, None)      # two rows look the same; write to neither
         self._row_index[label] = seen
