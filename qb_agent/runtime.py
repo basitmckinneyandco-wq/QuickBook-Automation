@@ -724,6 +724,11 @@ class Runtime:
             if not selected:
                 return unknown
 
+            # Last chance to obey a Pending someone typed into the sheet: the
+            # sender reads the local marks, not the screen, so a mark the sheet
+            # has already overruled has to be gone before the batch starts.
+            self.honour_resets()
+
             queue = [record.source_id for record in selected]
             finished: list[dict[str, object]] = []
             self._progress = {
@@ -938,6 +943,31 @@ class Runtime:
         found = self._row_lookup(record.source_tab).get(_policy_key(record))
         return found[0] if found else 0
 
+    def honour_resets(self) -> int:
+        """Make a Pending in the sheet undo a local mark, not merely hide it.
+
+        The dashboard already reads Pending as "this one still needs doing",
+        but that was only how the row was shown. The sender looks at the local
+        marks directly, so a premium marked "not needed" here stayed skipped:
+        the row read Pending, Send was pressed, and the premium came straight
+        back as Not needed. The mark has to actually go.
+        """
+        ids = list(self.records)
+        if not ids:
+            return 0
+        held = self.store.invoice_states(ids, self.config.mode)
+        cleared = 0
+        for source_id, record in self.records.items():
+            said = self._sheet_says(record)
+            for kind in INVOICE_KINDS.values():
+                if said.get(f"qb_{kind}") != _RESET:
+                    continue
+                state = held.get(source_id, {}).get(kind)
+                if state is not None and state.status == "not_needed":
+                    self.store.set_invoice_needed(source_id, self.config.mode, kind, True)
+                    cleared += 1
+        return cleared
+
     def refresh_statuses(self) -> int:
         """Re-read just the four status columns, straight from the sheet.
 
@@ -964,6 +994,8 @@ class Runtime:
                     if str(dict(record.extra).get(column, "")).strip() != word:
                         self._remember(record.source_id, column, word)
                         changed += 1
+        if changed:
+            self.honour_resets()
         return changed
 
     def _row_lookup(
