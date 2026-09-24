@@ -42,6 +42,10 @@ WATCH_SECONDS = 60
 # arrive through the published link, which does not carry real row numbers.
 LOOKUP_SECONDS = 300
 
+# What "Pending" in the sheet means: not a status to display, but an
+# instruction to forget what this machine thinks it did and judge the row again.
+_RESET = "__reset__"
+
 
 class Runtime:
     def __init__(self, config: AppConfig):
@@ -200,6 +204,9 @@ class Runtime:
             item["error_message"] = state.error_message
 
         said = elsewhere.get("qb_customer_job")
+        if said == _RESET:
+            state = None        # the sheet says start again; judge the row afresh
+            said = ""
         if said:
             item["status"] = said
             if _done_elsewhere(said, state is not None and bool(state.status)):
@@ -213,6 +220,9 @@ class Runtime:
         for kind in INVOICE_KINDS.values():
             saved = held.get(kind)
             from_sheet = elsewhere.get(f"qb_{kind}")
+            if from_sheet == _RESET:
+                saved = None
+                from_sheet = ""
             if saved is not None:
                 item[f"{kind}_txn_id"] = saved.txn_id
                 item[f"{kind}_ref_number"] = saved.ref_number
@@ -229,15 +239,23 @@ class Runtime:
                 )
         return item
 
-    # What each word in the sheet means here. A blank cell means the sheet has
-    # nothing to say; every other value is taken at its word, Pending included.
+    # What each word in the sheet means here.
+    #
+    # Only the first four record something a machine did, so only those are
+    # worth carrying between dashboards. Pending means the opposite - "this one
+    # is not done" - and is honoured as a reset: whatever this machine thinks
+    # it did, the row is judged afresh.
+    #
+    # "Needs review" is deliberately absent. It is not a decision anybody made;
+    # it is what a dashboard works out when something on the row is missing.
+    # Taking it from the sheet would freeze it there - a row whose gaps had
+    # since been filled would still read Needs review, for ever.
     _SHEET_STATUS = {
         "created": "completed",
         "already there": "completed",
         "failed": "failed",
-        "needs review": "needs_review",
         "not needed": "not_needed",
-        "pending": "ready",
+        "pending": _RESET,
     }
 
     def _sheet_says(self, record: WorkRecord) -> dict[str, str]:
