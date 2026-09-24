@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -201,7 +202,8 @@ class Runtime:
         said = elsewhere.get("qb_customer_job")
         if said:
             item["status"] = said
-            item["status_elsewhere"] = True
+            if _done_elsewhere(said, state is not None and bool(state.status)):
+                item["status_elsewhere"] = True
         elif state is not None and state.status:
             item["status"] = state.status
         else:
@@ -217,7 +219,8 @@ class Runtime:
                 item[f"{kind}_error"] = saved.error_message
             if from_sheet:
                 item[f"{kind}_status"] = from_sheet
-                item[f"{kind}_elsewhere"] = True
+                if _done_elsewhere(from_sheet, saved is not None and bool(saved.status)):
+                    item[f"{kind}_elsewhere"] = True
             elif saved is not None and saved.status:
                 item[f"{kind}_status"] = saved.status
             else:
@@ -775,6 +778,7 @@ class Runtime:
                     unplaced += 1
                     continue
                 updates.append((cell, word))
+                self._remember(record.source_id, column, word)
             if len(updates) >= limit:
                 break
 
@@ -788,6 +792,17 @@ class Runtime:
             return {"written": written, "error": str(exc)}
         self.sheet_write_error = ""
         return {"written": written, "rows": len(rows), "unplaced": unplaced}
+
+    def _remember(self, source_id: str, column: str, word: str) -> None:
+        """Note what the sheet now says about one row, having just written it."""
+        record = self.records.get(source_id)
+        if record is None:
+            return
+        extra = dict(record.extra)
+        if str(extra.get(column, "")).strip() == word:
+            return
+        extra[column] = word
+        self.records[source_id] = replace(record, extra=tuple(extra.items()))
 
     def _cell_for(self, record: WorkRecord, column: str) -> str:
         """The A1 address of one status column on one policy's row."""
@@ -805,12 +820,19 @@ class Runtime:
             return
         updates: list[tuple[str, str]] = []
         for item in results:
-            cell = self._status_cell(
-                str(item.get("source_id", "")), str(item.get("operation", ""))
-            )
+            source_id = str(item.get("source_id", ""))
+            operation = str(item.get("operation", ""))
+            cell = self._status_cell(source_id, operation)
             word = self._STATUS_WORD.get(str(item.get("status", "")))
             if cell and word:
                 updates.append((cell, word))
+                # The row in memory still holds what the sheet said when it was
+                # last read. Left stale, the next sync would read that old word
+                # back and write it over the one being sent now - undoing the
+                # result of the very send that produced it.
+                column = self._STATUS_FIELD.get(operation, "")
+                if column:
+                    self._remember(source_id, column, word)
         if not updates:
             return
         try:
@@ -1089,6 +1111,23 @@ class Runtime:
     def progress(self) -> dict[str, object]:
         """What the batch in flight has finished so far, and what is next."""
         return dict(self._progress)
+
+
+# Statuses that mean somebody actually did something. "Pending" and "Needs
+# review" are what any dashboard works out for itself from the row, so finding
+# them in the sheet says nothing about who has touched it.
+_ACTED = {"completed", "failed", "not_needed"}
+
+
+def _done_elsewhere(status: str, known_here: bool) -> bool:
+    """Should this badge be marked as another machine's work?
+
+    Only when somebody acted, and this machine has no record of being the one
+    who did. The app writes its own results into the sheet and reads them back
+    a minute later, so without the second test every row would carry the mark
+    and it would tell nobody anything.
+    """
+    return status in _ACTED and not known_here
 
 
 def _policy_key(record: WorkRecord) -> tuple[str, str, str]:

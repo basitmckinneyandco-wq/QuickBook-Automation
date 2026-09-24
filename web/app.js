@@ -219,7 +219,6 @@ function batchBadge(sourceId, column) {
 
 /** Mark a badge as something another dashboard did, read back from the sheet. */
 function markFromSheet(badge) {
-  badge.classList.add("from-sheet");
   const said = badge.title ? `${badge.title}  ` : "";
   badge.title = `${said}Done on another computer — read from the Google Sheet, `
               + `so this machine has no History entry for it.`;
