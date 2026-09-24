@@ -205,7 +205,14 @@ class Runtime:
 
         said = elsewhere.get("qb_customer_job")
         if said == _RESET:
-            state = None        # the sheet says start again; judge the row afresh
+            # "Pending" asks for the row to be judged again - but it cannot
+            # erase proof. A QuickBooks id is something this machine learned by
+            # doing the work, while the cell may simply be a stale copy: the
+            # published feed lags behind by a minute or more, so a send can be
+            # followed by a read that still says Pending. Honouring that would
+            # make a finished row look unsent until the feed caught up.
+            if state is None or not (state.customer_list_id or state.job_list_id):
+                state = None
             said = ""
         if said:
             item["status"] = said
@@ -221,7 +228,10 @@ class Runtime:
             saved = held.get(kind)
             from_sheet = elsewhere.get(f"qb_{kind}")
             if from_sheet == _RESET:
-                saved = None
+                # Same as above: an invoice with a transaction id in QuickBooks
+                # is not un-created by a cell that has yet to catch up.
+                if saved is None or not saved.txn_id:
+                    saved = None
                 from_sheet = ""
             if saved is not None:
                 item[f"{kind}_txn_id"] = saved.txn_id

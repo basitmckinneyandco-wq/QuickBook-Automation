@@ -126,6 +126,13 @@ class RequestProcessorTransport(AbstractContextManager["RequestProcessorTranspor
         developer, not at whoever is sitting in front of it.
         """
         raw = str(exc)
+        if "Could not start QuickBooks" in raw:
+            return (
+                "QuickBooks is not running. Open QuickBooks Desktop with your "
+                "company file, then try again. (The app can only work while "
+                "QuickBooks is open - it cannot start it for you once another "
+                "company has been opened during this session.)"
+            )
         if "must include the name of the data file" in raw:
             return (
                 "QuickBooks does not have a company file open. Start QuickBooks "
