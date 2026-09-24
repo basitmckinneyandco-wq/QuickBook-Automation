@@ -879,8 +879,15 @@ input[type=checkbox]:disabled { cursor: not-allowed; }
   transition: background-color .2s ease, color .2s ease;
 }
 .tag.ready { background: var(--danger-tint); color: var(--danger); }
-.tag.review { background: var(--warn-tint); color: var(--warn); }
-.tag.completed { background: var(--good-tint); color: var(--good); }
+/* Two spellings of the same thing: "review" is what the app works out from the
+   row, "needs_review" is what the history and the sheet call it. Both are the
+   same amber, or a badge loses its colour depending on where it came from. */
+.tag.review,
+.tag.needs_review { background: var(--warn-tint); color: var(--warn); }
+/* Created and Already there both mean the work is in QuickBooks, so both are
+   green - the difference is who put it there, not whether it is done. */
+.tag.completed,
+.tag.already_exists { background: var(--good-tint); color: var(--good); }
 .tag.simulated { background: var(--warn-tint); color: var(--warn); }
 .tag.failed { background: var(--danger-tint); color: var(--danger); }
 /* While a batch runs: the row being worked on, and the ones behind it. */
