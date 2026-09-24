@@ -838,6 +838,13 @@ class Runtime:
                 word = self._SHEET_WORD.get(str(shown.get(field, "")), "")
                 if not word or str(held.get(column, "")).strip() == word:
                     continue                      # nothing to say, or already says it
+                # An untouched row is left untouched. Pending and Needs review
+                # are what any dashboard works out for itself, so writing them
+                # into a blank cell tells a reader nothing and fills the sheet
+                # with thousands of them. They are written only to correct a
+                # cell that already says something.
+                if word in ("Pending", "Needs review") and not str(held.get(column, "")).strip():
+                    continue
                 cell = self._cell_for(record, column)
                 if not cell:
                     unplaced += 1
