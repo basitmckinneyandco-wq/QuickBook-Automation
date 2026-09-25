@@ -113,6 +113,7 @@ class Runtime:
                 premium=self.config.premium,
                 commission=self.config.commission,
                 fees=self.config.fees,
+                transaction_types=self.config.transaction_types,
             )
         return self._dry_gateway
 
@@ -715,8 +716,9 @@ class Runtime:
                 "Chart of Accounts",
             )
 
-        # The premium invoice picks its item from Carrier Type, so both must exist.
-        for name in ("Standard", "Non-Standard"):
+        # The premium invoice picks its item from Carrier Type, so both must
+        # exist - under whatever this company file calls them.
+        for name in (self.config.premium.item_standard, self.config.premium.item_non_standard):
             check(f"Premium item '{name}'", name, found["items"], "Item List")
 
         # These the app adds on demand, so they are reported, never failed.
@@ -881,12 +883,24 @@ class Runtime:
             state = states.get(record.source_id)
             if _is_obsolete_name_limit_review(state):
                 state = None
-            shown = self._state_payload(record, state, invoices.get(record.source_id, {}))
+            marks = invoices.get(record.source_id, {})
+            shown = self._state_payload(record, state, marks)
             held = dict(record.extra)
             for field, column in self._SHEET_FIELDS:
                 word = self._SHEET_WORD.get(str(shown.get(field, "")), "")
                 if not word or str(held.get(column, "")).strip() == word:
                     continue                      # nothing to say, or already says it
+                # "Not needed" goes in only when somebody decided it. The same
+                # word is also reached by a row having nothing to bill - no
+                # commission, no fee - and that is a reading of the row, not a
+                # decision. Written to the sheet it becomes permanent: fill the
+                # commission in afterwards and the cell still says Not needed,
+                # for ever, because the sheet is believed over the row.
+                if word == "Not needed":
+                    kind = field.removesuffix("_status")
+                    decided = marks.get(kind)
+                    if decided is None or decided.status != "not_needed":
+                        continue
                 # Every status, not only the ones that record an action: the
                 # sheet is meant to show what the dashboard shows, so somebody
                 # reading it sees Needs review on a row that is not ready

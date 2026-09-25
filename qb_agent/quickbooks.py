@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Protocol
 from xml.etree import ElementTree as ET
 
-from .config import InvoiceKindConfig
+from .config import InvoiceKindConfig, TransactionTypeConfig
 from .models import InvoiceSpec, WorkRecord
 from .qbxml import (
     QbResponse,
@@ -221,6 +221,7 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         premium: InvoiceKindConfig | None = None,
         commission: InvoiceKindConfig | None = None,
         fees: InvoiceKindConfig | None = None,
+        transaction_types: TransactionTypeConfig | None = None,
     ):
         self.transport = RequestProcessorTransport(company_file, app_name)
         self.builder = QbxmlBuilder(qbxml_version)
@@ -228,6 +229,7 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         self.premium = premium or InvoiceKindConfig("", "")
         self.commission = commission or InvoiceKindConfig("", "")
         self.fees = fees or InvoiceKindConfig("", "")
+        self.transaction_types = transaction_types or TransactionTypeConfig()
         # These lists are read once per session, not once per invoice.
         self._terms: dict[str, str] | None = None
         self._reps: dict[str, str] | None = None
@@ -366,7 +368,9 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
             description = record.fees_description
             amount = record.fees_amount
         else:
-            item = record.premium_item
+            # The row says which of the two it is; the settings say what that
+            # one is called in this company file.
+            item = premium_item_name(record, settings)
             description = record.premium_description
             amount = record.premium_amount
         return InvoiceSpec(
@@ -377,7 +381,11 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
             class_name=record.premium_class,
             template=settings.template,
             ar_account=settings.ar_account,
-            terms=self._resolve_terms(record.transaction_type, notes),
+            # The row says which tab it came from; the settings say what
+            # QuickBooks calls that on its Transaction Type list.
+            terms=self._resolve_terms(
+                self.transaction_types.name_for(record.source_tab), notes
+            ),
             sales_rep=self._resolve_sales_rep(record.lead_source, notes),
         )
 
@@ -772,6 +780,20 @@ def ui_blockers() -> dict[str, object]:
         "dialog": dialog,
         "safe_to_send": bool(titles) and not centre and not dialog,
     }
+
+
+def premium_item_name(record: WorkRecord, settings) -> str:
+    """What this company file calls the item the row's Carrier Type picks.
+
+    The row only says which of the two it is. The names live in the settings
+    because they differ between companies - "Standard" here, "Standard Market"
+    there - and a company that spells them differently should need no change to
+    the app, only to its own config.json.
+    """
+    kind = record.premium_item
+    if not kind:
+        return ""
+    return settings.item_non_standard if kind == "Non-Standard" else settings.item_standard
 
 
 def current_company_file() -> str:

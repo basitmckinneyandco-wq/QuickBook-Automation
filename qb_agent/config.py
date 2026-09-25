@@ -56,6 +56,28 @@ class GoogleSheetConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TransactionTypeConfig:
+    """What each tab is called in QuickBooks' Transaction Type list.
+
+    The app knows a row came from New Business or from Renewal; it cannot know
+    what that company file calls them. One spells it "New Business" and
+    "Renewal Busines", another something else again, and the name has to match
+    character for character or the invoice is refused. So it is named here.
+    """
+
+    new_biz: str = "New Biz"
+    renewal: str = "Renewal"
+
+    def name_for(self, tab: str) -> str:
+        value = tab.strip().casefold()
+        if "renew" in value:
+            return self.renewal
+        if "biz" in value or "buiz" in value or "new" in value:
+            return self.new_biz
+        return tab.strip()
+
+
+@dataclass(frozen=True, slots=True)
 class InvoiceKindConfig:
     """Where one kind of policy invoice lands in QuickBooks.
 
@@ -71,6 +93,13 @@ class InvoiceKindConfig:
     item: str = ""
     # Items are created on demand, and a new item needs an income account.
     item_income_account: str = ""
+    # The premium picks one of two items from the row's Carrier Type. What
+    # those two are called differs between company files - "Standard" in one,
+    # "Standard Market" in another - so they are named here rather than
+    # assumed, and a company that calls them something else needs no code
+    # change to work.
+    item_standard: str = "Standard"
+    item_non_standard: str = "Non-Standard"
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +121,7 @@ class AppConfig:
     google_sheet: GoogleSheetConfig = field(
         default_factory=lambda: GoogleSheetConfig(key_file="", spreadsheet_id="")
     )
+    transaction_types: TransactionTypeConfig = field(default_factory=TransactionTypeConfig)
     # Where this came from, so the app can write a change back to the same file.
     source_path: str = ""
 
@@ -125,6 +155,8 @@ def _invoice_kind(raw: Any) -> InvoiceKindConfig:
         ar_account=str(settings.get("ar_account", "")),
         item=str(settings.get("item", "")),
         item_income_account=str(settings.get("item_income_account", "")),
+        item_standard=str(settings.get("item_standard", "Standard")),
+        item_non_standard=str(settings.get("item_non_standard", "Non-Standard")),
     )
 
 
@@ -175,6 +207,10 @@ def load_config(filename: str | Path) -> AppConfig:
         premium=_invoice_kind(invoice.get("premium", {})),
         commission=_invoice_kind(invoice.get("commission", {})),
         fees=_invoice_kind(invoice.get("fees", {})),
+        transaction_types=TransactionTypeConfig(
+            new_biz=str(invoice.get("transaction_types", {}).get("new_biz", "New Biz")),
+            renewal=str(invoice.get("transaction_types", {}).get("renewal", "Renewal")),
+        ),
         company=CompanyConfig(
             display_name=str(company.get("display_name", "My Company")),
             file_path=str(company.get("file_path", "")),
