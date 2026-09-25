@@ -380,9 +380,15 @@ class Runtime:
                     print(
                         f"Sheet changed - now {len(self.records)} policies.", flush=True
                     )
-                # Having just read the sheet, put back anything it does not yet
-                # know. Only differences are written, so a settled sheet costs
-                # nothing at all.
+                # The rows have just arrived through the link, and its copy of
+                # the status columns is minutes old. Read those again from the
+                # sheet before deciding what to write back, or a status someone
+                # typed in the meantime is compared against the stale copy and
+                # promptly overwritten with what the app thought it was.
+                self.refresh_statuses()
+
+                # Then put back anything the sheet does not yet know. Only
+                # differences are written, so a settled sheet costs nothing.
                 done = self.sync_sheet()
                 if done.get("written"):
                     print(f"Sheet updated: {done['written']} cells.", flush=True)
@@ -996,6 +1002,10 @@ class Runtime:
                         changed += 1
         if changed:
             self.honour_resets()
+            # The page only pulls the rows again when this moves. Without it
+            # the app knew a colleague's status within the minute but the
+            # screen kept the old one until somebody pressed Refresh.
+            self.revision += 1
         return changed
 
     def _row_lookup(
