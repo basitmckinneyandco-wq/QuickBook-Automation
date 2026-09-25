@@ -162,6 +162,11 @@ class Runtime:
             "data_source_url": self.config.data_source.url,
             "loading": self.loading,
             "load_error": self.load_error,
+            # Why the sheet could not be written, if it could not. Silence here
+            # is how a machine ends up creating things in QuickBooks while
+            # nobody else ever hears about it.
+            "sheet_write_error": self.sheet_write_error,
+            "sheet_enabled": self.config.google_sheet.enabled,
             "tabs": self.tabs or ([self.config.data_source.default_tab] if self.config.data_source.default_tab else []),
             "active_tab": self.active_tab,
         }

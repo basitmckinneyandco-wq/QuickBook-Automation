@@ -223,6 +223,34 @@ function batchBadge(sourceId, column) {
   return null;
 }
 
+/* Said once, at the moment it matters. The work reached QuickBooks either way,
+   but nobody else will hear about it until the sheet can be written - and on a
+   machine that has never been able to write, every send is silently private. */
+let sheetWarningShown = false;
+
+async function warnIfSheetUnwritable() {
+  if (sheetWarningShown) return;
+  let health;
+  try {
+    health = await api("/api/health", {}, 10000);
+  } catch {
+    return;
+  }
+  if (!health.sheet_enabled || !health.sheet_write_error) return;
+  sheetWarningShown = true;
+  await ask({
+    title: "Done in QuickBooks, but the sheet was not updated",
+    sub: "The work is finished. Nobody else will see it, because the status "
+       + "columns in the Google Sheet could not be written.",
+    detail: health.sheet_write_error,
+    note: "Usually the key file: service-account.json belongs in the same "
+        + "folder as Start Dashboard.cmd, and the sheet must be shared with "
+        + "that service account as an Editor.",
+    ok: "Close",
+    tone: "danger",
+  });
+}
+
 /** Mark a badge as something another dashboard did, read back from the sheet. */
 function markFromSheet(badge) {
   const said = badge.title ? `${badge.title}  ` : "";
@@ -2401,9 +2429,19 @@ function renderStatus() {
   if (document.activeElement !== box && !unlocked) {
     box.value = health.data_source_url || "";
   }
+  // Reading and writing fail separately and for different reasons, so both
+  // are said. A machine that cannot write is still perfectly usable - it just
+  // creates things in QuickBooks that nobody else ever hears about, which is
+  // the one failure worth shouting about.
+  const trouble = [
+    health.load_error ? `Last read failed: ${health.load_error}` : "",
+    health.sheet_write_error
+      ? `The status columns are not being updated: ${health.sheet_write_error}`
+      : "",
+  ].filter(Boolean);
   const note = $("sourceNote");
-  note.hidden = !health.load_error;
-  if (health.load_error) note.textContent = `Last read failed: ${health.load_error}`;
+  note.hidden = !trouble.length;
+  note.textContent = trouble.join("  ");
 
   $("unlockPanel").hidden = Boolean(health.writes_enabled);
 }
@@ -3222,6 +3260,7 @@ async function actOnPolicy(sourceId, operation, button, label = "") {
       renderAll();   // rebuilds the row, so the button above no longer exists
       const result = (payload.results || [])[0];
       if (result) toast(`${result.label}: ${result.message}`, result.status === "failed");
+      warnIfSheetUnwritable();
       // Its new status may well have taken it off the current filter. Let it be
       // seen first.
       holdThenDrop([sourceId]);
@@ -3506,6 +3545,7 @@ async function processBatch(operation, ids, buttonId, { noun, label, clear = fal
       if (clear) for (const id of batch) state.selected.delete(id);
       renderAll();
       toast(bad ? `${good} done · ${bad} need attention` : `${what} finished.`, bad > 0);
+      await warnIfSheetUnwritable();
       if (bad) goto("history");
     } catch (error) {
       await recoverFromSendFailure(error);
