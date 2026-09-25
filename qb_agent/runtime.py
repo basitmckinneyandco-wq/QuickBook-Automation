@@ -1031,7 +1031,12 @@ class Runtime:
             return {}
         self._status_columns[label] = status_columns(grid)
         try:
-            found = build_records(label, grid)
+            # Every row, ready or not: this index is how a policy is found in
+            # the sheet, and the published link's idea of which rows are
+            # workable need not match ours. A row it sends that we would have
+            # filtered out still has to be findable, or its status can never
+            # be read or written.
+            found = build_records(label, grid, every_row=True)
         except WebSourceError:
             return {}
         seen: dict[tuple[str, str, str], tuple[int, dict[str, str]]] = {}

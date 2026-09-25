@@ -183,7 +183,16 @@ def fetch_tabs(url: str, timeout: int = FETCH_TIMEOUT) -> dict[str, list[list[ob
     return tabs
 
 
-def build_records(tab: str, rows: Sequence[Sequence[object]]) -> WebSourceResult:
+def build_records(
+    tab: str, rows: Sequence[Sequence[object]], *, every_row: bool = False
+) -> WebSourceResult:
+    """Read a tab into policies.
+
+    `every_row` keeps the ones that are not bound and done yet. They are no use
+    for invoicing, which is why they are dropped by default - but they are
+    still rows in the sheet, and finding a row by what identifies it must not
+    depend on whether it happens to be ready to work on.
+    """
     header_index, header = _find_header(rows)
     columns, warnings = _map_columns(header)
     # A feed that names its columns is matched by name. One that does not is
@@ -221,7 +230,7 @@ def build_records(tab: str, rows: Sequence[Sequence[object]]) -> WebSourceResult
             # No verified corporation name means the row is not accounting-ready.
             skipped += 1
             continue
-        if "bound_status" in columns and not _is_accounting_ready(
+        if not every_row and "bound_status" in columns and not _is_accounting_ready(
             _text(_cell(row, columns.get("bound_status"))),
             _text(_cell(row, columns.get("sheet_status"))),
         ):
@@ -233,7 +242,7 @@ def build_records(tab: str, rows: Sequence[Sequence[object]]) -> WebSourceResult
             warnings.append(f"Only the first {MAX_ROWS} rows were loaded.")
             break
 
-    if not records:
+    if not records and not every_row:
         raise WebSourceError(
             f"Tab '{tab}' has {len(data_rows)} rows but none are bound and done."
         )
