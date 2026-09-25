@@ -851,12 +851,14 @@ class Runtime:
                 word = self._SHEET_WORD.get(str(shown.get(field, "")), "")
                 if not word or str(held.get(column, "")).strip() == word:
                     continue                      # nothing to say, or already says it
-                # An untouched row is left untouched. Pending and Needs review
-                # are what any dashboard works out for itself, so writing them
-                # into a blank cell tells a reader nothing and fills the sheet
-                # with thousands of them. They are written only to correct a
-                # cell that already says something.
-                if word in ("Pending", "Needs review") and not str(held.get(column, "")).strip():
+                # Only what was actually done is reported here. Pending and
+                # Needs review are this app's own reading of the row, and
+                # writing them back every cycle meant nobody could set a cell
+                # by hand and have it stay: type Pending, and a minute later
+                # the app had replaced it with its own opinion. The sheet is
+                # where people say what they want; this is where the app says
+                # what it did.
+                if word not in _ACTIONS:
                     continue
                 cell = self._cell_for(record, column)
                 if not cell:
@@ -1277,6 +1279,10 @@ class Runtime:
 # review" are what any dashboard works out for itself from the row, so finding
 # them in the sheet says nothing about who has touched it.
 _ACTED = {"completed", "failed", "not_needed"}
+
+# The same idea in the sheet's own words: what the app puts there unasked.
+# Anything else it might think about a row is left for the row to say.
+_ACTIONS = {"Created", "Failed", "Not needed"}
 
 
 def _done_elsewhere(status: str, known_here: bool) -> bool:
