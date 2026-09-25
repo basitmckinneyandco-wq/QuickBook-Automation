@@ -212,6 +212,11 @@ class Runtime:
             item["invoice_txn_id"] = state.invoice_txn_id
             item["error_message"] = state.error_message
 
+        # Pending typed into the sheet is an instruction, and it is obeyed as
+        # written: the row shows Pending, not this app's opinion of it. The
+        # reasons a row is not ready are still carried on the badge, so the
+        # warning is a click away and a send still refuses it with the reason -
+        # but nobody has to argue with the dashboard about what they typed.
         said = elsewhere.get("qb_customer_job")
         if said == _RESET:
             # "Pending" is somebody saying this one still needs doing, and it
@@ -224,7 +229,7 @@ class Runtime:
             # would be followed by a read that still said Pending and would
             # undo itself.
             state = None
-            said = ""
+            said = "ready"      # as typed: Pending, not "Needs review"
         if said:
             item["status"] = said
             if _done_elsewhere(said, state is not None and bool(state.status)):
@@ -240,7 +245,7 @@ class Runtime:
             from_sheet = elsewhere.get(f"qb_{kind}")
             if from_sheet == _RESET:
                 saved = None        # same as above: Pending puts it back in the queue
-                from_sheet = ""
+                from_sheet = "ready"
             if saved is not None:
                 item[f"{kind}_txn_id"] = saved.txn_id
                 item[f"{kind}_ref_number"] = saved.ref_number

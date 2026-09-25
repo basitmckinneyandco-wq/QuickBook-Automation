@@ -156,7 +156,13 @@ const EXTRA_COLUMNS = [
           : tag(`${label} (safe test)`, "simulated");
         const reasons = record[`${kind.key}_reasons`] || [];
         const error = record[`${kind.key}_error`];
-        const detail = error && status === "failed" ? error : reasons.join(" ");
+        // A finished invoice carries no warning. The reasons describe what
+        // would stop it being raised, and once it has been raised they are
+        // simply out of date - a green "Created" beside a warning icon reads
+        // as though something went wrong when nothing did.
+        const detail = error && status === "failed"
+          ? error
+          : (DONE.has(status) || status === NOT_NEEDED ? "" : reasons.join(" "));
         if (detail) {
           badge.title = detail;
           badge.append(document.createTextNode(" ⓘ"));
@@ -2292,7 +2298,9 @@ function buildRow(record) {
     ? "Safe mode is on, so this was only simulated — nothing was written to QuickBooks."
     : record.error_message && status === "failed"
       ? record.error_message
-      : reasons.join(" ");
+      // Same as the invoice badges: once the customer and job exist, the
+      // reasons they could not be created are history, not a warning.
+      : (DONE.has(status) ? "" : reasons.join(" "));
 
   const view = { status, simulated, confirmedInQb, reasons, edited, blocked, detail, live };
 
