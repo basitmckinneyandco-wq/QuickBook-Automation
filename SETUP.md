@@ -53,7 +53,30 @@ editing.
 
 ---
 
-## 3. Install the one package it needs
+## 2b. The Google key file
+
+The dashboard keeps four columns in the sheet up to date — **QB Customer/Job**,
+**QB Premium**, **QB Commission**, **QB Fees** — so anyone working that sheet
+can see what has already been done, on any machine.
+
+It signs in to Google as a *service account* to do that, using a key file:
+
+```
+service-account.json      (goes in this folder, beside Start Dashboard.cmd)
+```
+
+**It is deliberately not in the zip.** A service-account key is a password:
+anyone holding it can read and write every sheet that account can reach, so it
+is never committed to git and never packed into a file that gets emailed
+around. Ask whoever sent you the folder to give you the key separately.
+
+Without it everything else still works — policies load, customers and invoices
+are still created — but the four status columns stop updating in both
+directions.
+
+---
+
+## 3. Install the packages it needs
 
 Open **PowerShell**, go to the folder, and run:
 
@@ -62,8 +85,9 @@ cd "D:\AI\code\qb-automation"
 pip install -r requirements.txt
 ```
 
-That installs `pywin32`, which is how Python talks to QuickBooks. Everything
-else the app uses comes with Python.
+That installs two things: `pywin32`, which is how Python talks to QuickBooks,
+and `google-auth`, which is how it signs in to the sheet. Everything else the
+app uses comes with Python.
 
 ---
 

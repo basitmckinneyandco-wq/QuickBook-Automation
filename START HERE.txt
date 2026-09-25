@@ -34,6 +34,27 @@ already installs the part that lets this app talk to it.
 
 
 ---------------------------------------------------------------
+STEP 2b  Put the Google key file in this folder
+---------------------------------------------------------------
+
+The dashboard reads and writes four columns in the Google Sheet -
+QB Customer/Job, QB Premium, QB Commission, QB Fees - so that
+everyone working the sheet can see what has already been done.
+
+To do that it needs a key file called:
+
+    service-account.json
+
+It is NOT in this zip, on purpose: it is a password, and passwords
+do not travel in a file everybody has a copy of. Ask whoever sent
+you this folder for it, and put it here, next to Start Dashboard.cmd.
+
+Without it the dashboard still runs and still creates things in
+QuickBooks - only the four status columns stop working, in both
+directions.
+
+
+---------------------------------------------------------------
 STEP 3   Put an icon on your Desktop
 ---------------------------------------------------------------
 
