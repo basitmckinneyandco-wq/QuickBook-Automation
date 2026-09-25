@@ -382,6 +382,24 @@ class Store:
                 (source_id, field, value, _now()),
             )
 
+    def forget_record(self, source_id: str, mode: str) -> bool:
+        """Drop what this machine remembers about creating a row's customer.
+
+        Used when the sheet puts a row back in the queue. The memory is a
+        shortcut - it lets a re-send skip work already done - and a shortcut
+        held past its usefulness is worse than none: the customer may since
+        have been deleted in QuickBooks, and a row that skips on the strength
+        of this would never be created again.
+
+        The events are left alone. They are the log of what happened, and that
+        happened.
+        """
+        with self.connection() as connection:
+            changed = connection.execute(
+                "DELETE FROM record_state WHERE source_id=? AND mode=?", (source_id, mode)
+            ).rowcount
+        return bool(changed)
+
     def clear_override(self, source_id: str, field: str) -> None:
         with self.connection() as connection:
             connection.execute(

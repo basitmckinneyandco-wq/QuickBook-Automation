@@ -399,6 +399,13 @@ class Runtime:
                 done = self.sync_sheet()
                 if done.get("written"):
                     print(f"Sheet updated: {done['written']} cells.", flush=True)
+                if done.get("unplaced"):
+                    self.sheet_write_error = (
+                        f"{done['unplaced']} status(es) could not be written: their row "
+                        "could not be told apart from another with the same corporation, "
+                        "policy number and effective date."
+                    )
+                    print(f"Sheet: {self.sheet_write_error}", flush=True)
             except Exception as exc:
                 # A blip in the feed must not kill the watcher; it tries again.
                 self.load_error = str(exc)
@@ -867,6 +874,11 @@ class Runtime:
                     continue
                 cell = self._cell_for(record, column)
                 if not cell:
+                    # Its row in the sheet could not be identified - usually
+                    # two rows that look the same to the naked eye, where
+                    # writing to either would be a guess. Counted and reported
+                    # rather than passed over in silence: the person would
+                    # otherwise watch a status never appear and have no idea why.
                     unplaced += 1
                     continue
                 updates.append((cell, word))
@@ -974,6 +986,13 @@ class Runtime:
         cleared = 0
         for source_id, record in self.records.items():
             said = self._sheet_says(record)
+            # The customer's own record goes too. A send checks this memory
+            # first and skips a row it says is done - without asking
+            # QuickBooks - so a row put back in the queue would be skipped for
+            # ever, even if the customer had since been deleted there.
+            if said.get("qb_customer_job") == _RESET:
+                if self.store.forget_record(source_id, self.config.mode):
+                    cleared += 1
             for kind in INVOICE_KINDS.values():
                 if said.get(f"qb_{kind}") != _RESET:
                     continue
