@@ -212,11 +212,12 @@ class Runtime:
             item["invoice_txn_id"] = state.invoice_txn_id
             item["error_message"] = state.error_message
 
-        # Pending typed into the sheet is an instruction, and it is obeyed as
-        # written: the row shows Pending, not this app's opinion of it. The
-        # reasons a row is not ready are still carried on the badge, so the
-        # warning is a click away and a send still refuses it with the reason -
-        # but nobody has to argue with the dashboard about what they typed.
+        # Pending typed into the sheet says "this one still needs doing". It is
+        # obeyed as an instruction - whatever was done before is set aside - but
+        # it is not a status to display: the badge then says what is true of the
+        # row, which is Pending when it is ready to send and Needs review when
+        # something on it would stop QuickBooks accepting it. Showing Pending on
+        # a row that cannot be sent would be the dashboard lying politely.
         said = elsewhere.get("qb_customer_job")
         if said == _RESET:
             # "Pending" is somebody saying this one still needs doing, and it
@@ -229,7 +230,7 @@ class Runtime:
             # would be followed by a read that still said Pending and would
             # undo itself.
             state = None
-            said = "ready"      # as typed: Pending, not "Needs review"
+            said = ""           # then judged on the row, below
         if said:
             item["status"] = said
             if _done_elsewhere(said, state is not None and bool(state.status)):
@@ -245,7 +246,7 @@ class Runtime:
             from_sheet = elsewhere.get(f"qb_{kind}")
             if from_sheet == _RESET:
                 saved = None        # same as above: Pending puts it back in the queue
-                from_sheet = "ready"
+                from_sheet = ""     # then judged on the row, below
             if saved is not None:
                 item[f"{kind}_txn_id"] = saved.txn_id
                 item[f"{kind}_ref_number"] = saved.ref_number
@@ -394,18 +395,12 @@ class Runtime:
                 # promptly overwritten with what the app thought it was.
                 self.refresh_statuses()
 
-                # Then put back anything the sheet does not yet know. Only
-                # differences are written, so a settled sheet costs nothing.
-                done = self.sync_sheet()
-                if done.get("written"):
-                    print(f"Sheet updated: {done['written']} cells.", flush=True)
-                if done.get("unplaced"):
-                    self.sheet_write_error = (
-                        f"{done['unplaced']} status(es) could not be written: their row "
-                        "could not be told apart from another with the same corporation, "
-                        "policy number and effective date."
-                    )
-                    print(f"Sheet: {self.sheet_write_error}", flush=True)
+                # Nothing is written back here. The sheet is only ever written
+                # as the direct result of somebody doing something - a send, or
+                # marking a premium as not needed - so a cell never changes
+                # under the hands of the person who typed it. A sweep that
+                # tidied the sheet towards this machine's own history was
+                # indistinguishable, from the other side, from the app arguing.
             except Exception as exc:
                 # A blip in the feed must not kill the watcher; it tries again.
                 self.load_error = str(exc)
@@ -835,12 +830,13 @@ class Runtime:
     )
 
     def sync_sheet(self, limit: int = 4000) -> dict[str, object]:
-        """Make the sheet say what the dashboard says, for every loaded row.
+        """Write what this machine has done into the sheet, for every loaded row.
 
-        Only cells that differ are written. Everything the dashboard shows is
-        already derived from the sheet where the sheet has an opinion, so a
-        second run has nothing left to do - there is no tug of war between the
-        two, and no write when nothing has changed.
+        Nothing calls this on a timer. It is kept for putting a sheet back in
+        step deliberately - after the columns have been cleared, say - because
+        running it in the background meant cells changed while somebody was
+        looking at them, which is indistinguishable from the app arguing with
+        whoever typed them.
         """
         settings = self.config.google_sheet
         if not (settings.enabled and settings.write_status):
