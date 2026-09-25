@@ -395,12 +395,18 @@ class Runtime:
                 # promptly overwritten with what the app thought it was.
                 self.refresh_statuses()
 
-                # Nothing is written back here. The sheet is only ever written
-                # as the direct result of somebody doing something - a send, or
-                # marking a premium as not needed - so a cell never changes
-                # under the hands of the person who typed it. A sweep that
-                # tidied the sheet towards this machine's own history was
-                # indistinguishable, from the other side, from the app arguing.
+                # Put the sheet back in step with the dashboard. Only cells
+                # that differ are written, so a settled sheet costs nothing.
+                done = self.sync_sheet()
+                if done.get("written"):
+                    print(f"Sheet updated: {done['written']} cells.", flush=True)
+                if done.get("unplaced"):
+                    self.sheet_write_error = (
+                        f"{done['unplaced']} status(es) could not be written: their row "
+                        "could not be told apart from another with the same corporation, "
+                        "policy number and effective date."
+                    )
+                    print(f"Sheet: {self.sheet_write_error}", flush=True)
             except Exception as exc:
                 # A blip in the feed must not kill the watcher; it tries again.
                 self.load_error = str(exc)
@@ -859,15 +865,16 @@ class Runtime:
                 word = self._SHEET_WORD.get(str(shown.get(field, "")), "")
                 if not word or str(held.get(column, "")).strip() == word:
                     continue                      # nothing to say, or already says it
-                # Only what was actually done is reported here. Pending and
-                # Needs review are this app's own reading of the row, and
-                # writing them back every cycle meant nobody could set a cell
-                # by hand and have it stay: type Pending, and a minute later
-                # the app had replaced it with its own opinion. The sheet is
-                # where people say what they want; this is where the app says
-                # what it did.
-                if word not in _ACTIONS:
-                    continue
+                # Every status, not only the ones that record an action: the
+                # sheet is meant to show what the dashboard shows, so somebody
+                # reading it sees Needs review on a row that is not ready
+                # rather than a bare Pending that says nothing about why.
+                #
+                # The cost is real and worth stating. Typing Pending on a row
+                # the app considers incomplete will read Needs review again
+                # shortly - not the app being stubborn, but the row being
+                # described. The reset still happened; the word just reports
+                # what the row is now.
                 cell = self._cell_for(record, column)
                 if not cell:
                     # Its row in the sheet could not be identified - usually
