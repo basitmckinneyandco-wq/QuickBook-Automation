@@ -49,9 +49,11 @@ _RESET = "__reset__"
 # The four columns a dashboard writes, as the rows carry them.
 STATUS_FIELDS = ("qb_customer_job", "qb_premium", "qb_commission", "qb_fees")
 
-# How often those columns are re-read straight from the sheet. Cheap - a couple
-# of seconds - so it can run far more often than the row feed.
-STATUS_WATCH_SECONDS = 45
+# How often those columns are re-read straight from the sheet. Two seconds a
+# read, so this can run often: someone typing a status into the sheet expects
+# to see it on the dashboard about as fast as they would see it on a colleague's
+# screen, not a minute later.
+STATUS_WATCH_SECONDS = 15
 
 
 class Runtime:

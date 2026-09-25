@@ -553,7 +553,11 @@ async function refresh() {
    the answer is yes, so the numbers count up and the new rows slide in
    instead of the whole table blinking every few seconds. */
 
-const WATCH_MS = 20000;   // the server polls the sheet each minute; this catches it promptly
+// How often the page asks whether anything has changed. The answer is a few
+// hundred bytes and usually "no", so this can be brisk - it is half of how
+// long a colleague's status takes to appear, and the slower half is the read
+// from Google.
+const WATCH_MS = 6000;
 
 function startWatching() {
   setInterval(checkForChanges, WATCH_MS);
