@@ -231,6 +231,11 @@ class Runtime:
             # undo itself.
             state = None
             said = ""           # then judged on the row, below
+        # Same for the customer: a refusal is about the row, and the row can be
+        # corrected.
+        if state is not None and state.status == "needs_review":
+            state = None
+
         if said:
             item["status"] = said
             if _done_elsewhere(said, state is not None and bool(state.status)):
@@ -243,6 +248,15 @@ class Runtime:
         held = invoices or {}
         for kind in INVOICE_KINDS.values():
             saved = held.get(kind)
+            # "Needs review" is a judgement about the row, not something that
+            # happened in QuickBooks: it means a send was refused before it
+            # started. Keeping it would freeze that verdict - fill in the
+            # missing commission and the row would still read Needs review,
+            # for ever, because of one refusal weeks ago. It is worked out
+            # again every time instead. Created, Failed and Not needed all
+            # record real events and are kept.
+            if saved is not None and saved.status == "needs_review":
+                saved = None
             from_sheet = elsewhere.get(f"qb_{kind}")
             if from_sheet == _RESET:
                 saved = None        # same as above: Pending puts it back in the queue
@@ -257,6 +271,9 @@ class Runtime:
                     item[f"{kind}_elsewhere"] = True
             elif saved is not None and saved.status:
                 item[f"{kind}_status"] = saved.status
+            elif not record.invoice_applies(kind):
+                # Nothing to bill, so nothing to do and nothing to fix.
+                item[f"{kind}_status"] = "not_needed"
             else:
                 item[f"{kind}_status"] = (
                     "review" if record.invoice_reasons(kind) else "ready"

@@ -298,7 +298,9 @@ const INVOICE_KINDS = [
     note: "Commission, on the Commission A/R account, item is the carrier.",
     operation: "commission_invoice",
     amount: (record) => record.commission_amount,
-    applies: () => true,
+    // No commission earned, no commission invoice. Same rule as fees: the
+    // choice is not offered rather than offered and refused.
+    applies: (record) => moneyValue(record.commission_amount) > 0,
   },
   {
     key: "fees",

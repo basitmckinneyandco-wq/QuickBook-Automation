@@ -277,6 +277,23 @@ class WorkRecord:
             return self.fees_reasons()
         return self.premium_reasons()
 
+    def invoice_applies(self, kind: str) -> bool:
+        """Is there anything to bill for this kind of invoice at all?
+
+        A policy that earns no commission needs no commission invoice, and one
+        with no agency fee needs no fees invoice. That is not a row waiting to
+        be fixed - there is simply nothing to raise, and calling it "needs
+        review" sends somebody looking for a mistake that was never made.
+
+        The premium always applies: every policy has one, and a net due of zero
+        really is something to look into.
+        """
+        if kind == "commission":
+            return self.commission_amount > 0
+        if kind == "fees":
+            return self.fees_amount > 0
+        return True
+
     def premium_reasons(self) -> list[str]:
         """Everything that stops a premium invoice being raised."""
         reasons = self.customer_reasons()
