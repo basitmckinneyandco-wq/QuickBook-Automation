@@ -565,7 +565,9 @@ class LeadSourceMatchingTests(unittest.TestCase):
         gateway.builder = QbxmlBuilder("13.0")
         gateway._reps = None
         gateway._rep_names = {}
-        gateway.source_aliases = {"tahir": "Taher"}
+        gateway.source_aliases = {
+            "tahir": "Taher", "razia winback": "Razia", "amber": "AMBREEN MERCHANT",
+        }
         gateway._send = lambda xml: sent.append(xml)
         return gateway, sent
 
@@ -593,7 +595,9 @@ class LeadSourceMatchingTests(unittest.TestCase):
         for value, initials in [
             ("Cross Sell, Ahmed", "Ahmed"),
             ("Dilshad / Razia", "Razia"),
-            ("Razia winback, Nur", "NUR"),
+            # Razia winback is linked to Razia, and comes first.
+            ("Razia winback, Nur", "Razia"),
+            ("Cross Sell, Nur", "NUR"),
             ("Tahir, Razia winback", "Taher"),
         ]:
             with self.subTest(value):
@@ -612,6 +616,19 @@ class LeadSourceMatchingTests(unittest.TestCase):
                 got, added = self.resolve(value)
                 self.assertEqual(got, "Taher")
                 self.assertEqual(added, [])
+
+    def test_razia_winback_is_razia(self):
+        got, added = self.resolve("Razia winback")
+        self.assertEqual(got, "Razia")
+        self.assertEqual(added, [])
+
+    def test_a_link_to_someone_not_yet_a_rep_makes_that_person_a_rep(self):
+        """Amber is the employee Ambreen Merchant. She is made a rep under her
+        own name - never a new "Amber" beside her."""
+        got, added = self.resolve("Amber")
+        self.assertEqual(len(added), 1)
+        self.assertIn("<FullName>AMBREEN MERCHANT</FullName>", added[0])
+        self.assertNotIn(">Amber<", added[0])
 
     def test_a_blank_lead_source_leaves_source_empty(self):
         got, added = self.resolve("")

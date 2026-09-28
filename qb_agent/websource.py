@@ -31,7 +31,9 @@ FETCH_TIMEOUT = 120
 MAX_ROWS = 5000
 
 # What the sheet's tabs are called in the dashboard.
-TAB_LABELS = {"nb": "New Biz", "renewal": "Renewal"}
+# What each tab is called on screen. Only the label: a policy's saved identity
+# is built from the raw tab name, so renaming a label never loses its history.
+TAB_LABELS = {"nb": "New Business", "renewal": "Renewal"}
 
 
 def tab_label(tab: str) -> str:

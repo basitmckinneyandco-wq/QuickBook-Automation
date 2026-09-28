@@ -213,8 +213,20 @@ class HeaderlessExportTests(unittest.TestCase):
 
 class TabLabelTests(unittest.TestCase):
     def test_rows_carry_the_tab_they_came_from(self):
-        self.assertEqual(build_records("nb", ROWS).records[0].source_tab, "New Biz")
+        self.assertEqual(build_records("nb", ROWS).records[0].source_tab, "New Business")
         self.assertEqual(build_records("renewal", ROWS).records[0].source_tab, "Renewal")
+
+    def test_renaming_the_label_keeps_the_saved_identity(self):
+        """The saved history is keyed by the raw tab name, so the label can
+        change without every policy losing what was done to it."""
+        record = build_records("nb", ROWS).records[0]
+        from qb_agent.importer import deterministic_source_id
+
+        self.assertEqual(
+            record.source_id,
+            deterministic_source_id("web:nb", record.row_number, record.customer_name,
+                                    record.invoice_number),
+        )
 
     def test_an_unknown_tab_keeps_its_own_name(self):
         self.assertEqual(build_records("extra", ROWS).records[0].source_tab, "extra")

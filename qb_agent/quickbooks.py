@@ -637,6 +637,10 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
             if found:
                 return found
         value = (parts or [value])[0]
+        # A linked spelling adds the person it points at, not the spelling:
+        # "Amber" makes the employee AMBREEN MERCHANT a rep, rather than a new
+        # name "Amber" beside her that nobody would recognise in QuickBooks.
+        value = self.source_aliases.get(_rep_key(value), value)
         initial = self._free_initial(value)
         try:
             # The rep needs a person behind it; an Other Name is the lightest.

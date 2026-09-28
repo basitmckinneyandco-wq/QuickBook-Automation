@@ -1316,6 +1316,38 @@ td[data-key="__invoice"] .tag { display: block; margin-bottom: 3px; text-align: 
 }
 @media (prefers-reduced-motion: reduce) { .spinner-sm { animation-duration: 2s; } }
 
+/* Refresh policies: a circular arrow turning while the sheet is read, a
+   seconds count beside it (the load can take a minute or two), and one soft
+   pulse when it is done so the finish is not missed. */
+.refresh-icon {
+  position: relative; display: inline-block; width: 12px; height: 12px;
+  margin-right: 7px; vertical-align: -1px; border-radius: 50%;
+  border: 1.75px solid currentColor; border-right-color: transparent;
+  animation: spin .85s linear infinite;
+}
+.refresh-icon::after {         /* the arrowhead, riding the open end of the ring */
+  content: ""; position: absolute; top: -3px; right: -1px;
+  border: 3px solid transparent; border-left: 4px solid currentColor;
+  transform: rotate(-35deg);
+}
+.btn.refreshing {
+  color: var(--accent); border-color: var(--accent); background: var(--accent-tint);
+}
+.btn.refreshing:disabled { opacity: 1; }      /* busy, not unavailable */
+.refresh-time {
+  margin-left: 4px; font-variant-numeric: tabular-nums; opacity: .65; font-weight: 500;
+}
+.btn.just-refreshed { animation: refresh-done .7s ease-out; }
+@keyframes refresh-done {
+  0%   { box-shadow: 0 0 0 0 var(--accent-tint); border-color: var(--accent); }
+  50%  { box-shadow: 0 0 0 6px var(--accent-tint); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .refresh-icon { animation-duration: 2.4s; }
+  .btn.just-refreshed { animation: none; }
+}
+
 .mini-btn.is-busy, .btn.is-busy { cursor: wait; }
 .mini-btn.is-busy { color: var(--accent); border-color: var(--accent); background: var(--accent-tint); }
 

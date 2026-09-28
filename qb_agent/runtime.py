@@ -25,7 +25,7 @@ from .quickbooks import (
     ui_blockers,
 )
 from .storage import Store
-from .websource import WebSourceError, build_records, fetch_tabs, tab_label
+from .websource import TAB_LABELS, WebSourceError, build_records, fetch_tabs, tab_label
 
 # The most policies one request may carry. QuickBooks is worked through one at
 # a time behind a single session, so a smaller batch means quicker feedback,
@@ -113,6 +113,10 @@ class Runtime:
         # that cell. A read of the sheet that began before then may have been
         # answered from before the write, so it says nothing about that cell.
         self._written_at: dict[tuple[str, str], float] = {}
+        # One status read at a time. The watcher and a Refresh click can land
+        # together, and two passes seeing the same fresh "Pending" would both
+        # act on it.
+        self._status_lock = Lock()
 
     def _gateway(self):
         if self.config.mode == "quickbooks":
@@ -180,7 +184,11 @@ class Runtime:
             # nobody else ever hears about it.
             "sheet_write_error": self.sheet_write_error,
             "sheet_enabled": self.config.google_sheet.enabled,
-            "tabs": self.tabs or ([self.config.data_source.default_tab] if self.config.data_source.default_tab else []),
+            # Both kinds of business always, then anything else the feed had.
+            # Built from what arrived, the list lost New Business whenever
+            # none of its rows happened to be ready, and showed the raw
+            # setting "nb" before the first download finished.
+            "tabs": list(dict.fromkeys([*TAB_LABELS.values(), *self.tabs])),
             "active_tab": self.active_tab,
         }
 
@@ -1137,6 +1145,11 @@ class Runtime:
         settings = self.config.google_sheet
         if not settings.enabled or settings.read_rows:
             return 0        # reading the sheet directly is already this fresh
+        with self._status_lock:
+            return self._refresh_statuses()
+
+    def _refresh_statuses(self) -> int:
+        settings = self.config.google_sheet
         changed = 0
         # Cells that have only now become Pending. A reset is the moment of
         # the change, not the word sitting there afterwards.

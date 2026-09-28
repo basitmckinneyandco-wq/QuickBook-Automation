@@ -97,6 +97,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         try:
             if self.path == "/api/fetch":
                 self._json(self._fetch())
+            elif self.path == "/api/statuses":
+                self._json(self._statuses())
             elif self.path == "/api/edit":
                 self._json(self._edit())
             elif self.path == "/api/edit-many":
@@ -123,11 +125,25 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         summary = self.server.runtime.fetch_web(
             tab=str(payload.get("tab", "")), force=bool(payload.get("force", False))
         )
+        # The link's copy of the status columns is minutes old by the time it
+        # arrives. Read them again straight from the sheet, or a refresh would
+        # show the page older statuses than it had before the click.
+        self.server.runtime.refresh_statuses()
         log(
             f"Fetched {summary['loaded_rows']} row(s) from the {summary['tab']} tab "
             f"({summary['skipped_rows']} skipped)"
         )
         return {"import": summary, "records": self.server.runtime.records_payload()}
+
+    def _statuses(self) -> dict[str, object]:
+        """Re-read the four status columns now - a couple of seconds, not minutes.
+
+        Pressing Refresh is someone asking to see what colleagues have done.
+        The rows themselves come through the published link, which is slow;
+        this answers the part that changes while people work, straight away.
+        """
+        changed = self.server.runtime.refresh_statuses()
+        return {"changed": changed, "sheet_enabled": self.server.runtime.config.google_sheet.enabled}
 
     def _edit_many(self) -> dict[str, object]:
         """Apply the same corrections to every chosen policy."""

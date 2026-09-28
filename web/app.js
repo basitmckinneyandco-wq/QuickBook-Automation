@@ -813,7 +813,7 @@ function shortReason(reason) {
   return reason.split(",")[0].replace(/\.$/, "");
 }
 
-/** New Biz against Renewal, as one bar plus the numbers behind it. */
+/** New Business against Renewal, as one bar plus the numbers behind it. */
 function renderMix() {
   const tally = new Map();
   for (const record of state.records) {
@@ -821,8 +821,8 @@ function renderMix() {
     tally.set(key, (tally.get(key) || 0) + 1);
   }
   const total = state.records.length || 1;
-  const order = ["New Biz", "Renewal", ...[...tally.keys()].filter(
-    (key) => key !== "New Biz" && key !== "Renewal"
+  const order = ["New Business", "Renewal", ...[...tally.keys()].filter(
+    (key) => key !== "New Business" && key !== "Renewal"
   )];
   const parts = order.filter((key) => tally.has(key));
 
@@ -3147,10 +3147,50 @@ function renderPreflight(result) {
 
 /* ═══ actions ═════════════════════════════════════════════════════════════ */
 
+/* Refresh does two things, fast one first.
+
+   The statuses - Created, Pending, what colleagues have done - are read
+   straight from the sheet in a couple of seconds, and the table updates at
+   once. The rows themselves come through the published link, which takes a
+   minute or two; the button keeps spinning, with a running count of seconds,
+   until they are in. Without the first step a click looked like nothing had
+   happened for most of two minutes. */
 async function fetchSheet(tab = "", force = false) {
+  const button = $("refreshButton");
+  if (button.classList.contains("is-busy")) return;   // already refreshing
   state.selected.clear();
-  $("refreshButton").disabled = true;
+  const label = button.textContent;
+  const started = Date.now();
+  const show = (text) => {
+    const seconds = Math.round((Date.now() - started) / 1000);
+    button.innerHTML =
+      `<span class="refresh-icon" aria-hidden="true"></span>${text}` +
+      (seconds >= 2 ? ` <span class="refresh-time">${seconds}s</span>` : "");
+  };
+  button.disabled = true;
+  button.classList.add("is-busy", "refreshing");
+  let phase = "Checking statuses…";
+  show(phase);
+  const tick = setInterval(() => show(phase), 1000);
+
   try {
+    try {
+      const quick = await api("/api/statuses", { method: "POST" }, 30000);
+      await refresh();
+      if (quick.sheet_enabled) {
+        toast(
+          quick.changed
+            ? `${quick.changed} status${quick.changed === 1 ? "" : "es"} updated from the sheet.`
+            : "Statuses are up to date. Now loading the policies…"
+        );
+      }
+    } catch {
+      // The quick read is a head start, not a requirement: the full load
+      // below re-reads the statuses too, so carry on to it.
+    }
+
+    phase = "Loading policies…";
+    show(phase);
     // Downloading the sheet and rebuilding 2,000+ policies takes well over the
     // ordinary deadline, so this call gets the longer one.
     const payload = await api(
@@ -3167,13 +3207,18 @@ async function fetchSheet(tab = "", force = false) {
     // just blanks and headers, and how a column was matched is not news. The
     // toast says what loaded; only a real failure below gets the banner.
     hideNote();
-    toast(`Loaded ${summary.loaded_rows} policies.`);
     await refresh();
+    toast(`Refreshed — ${summary.loaded_rows} ${summary.loaded_rows === 1 ? "policy" : "policies"} loaded.`);
+    button.classList.add("just-refreshed");
+    setTimeout(() => button.classList.remove("just-refreshed"), 700);
   } catch (error) {
     note(error.message, "error");
     toast(error.message, true);
   } finally {
-    $("refreshButton").disabled = false;
+    clearInterval(tick);
+    button.classList.remove("is-busy", "refreshing");
+    button.textContent = label;
+    button.disabled = false;
   }
 }
 
