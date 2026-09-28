@@ -65,8 +65,13 @@ class InvoiceSpec:
     class_name: str = ""
     template: str = ""
     ar_account: str = ""
-    terms: str = ""
+    # The template's "Transaction Type", which is QuickBooks' Ship Via field.
+    transaction_type: str = ""
     sales_rep: str = ""
+    # What goes in the invoice's number box, when it is not the policy number.
+    ref_number: str = ""
+    # The Memo, when this kind always carries one.
+    memo: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,12 +202,24 @@ class WorkRecord:
 
     @property
     def transaction_type(self) -> str:
-        """Which tab the row came from becomes QuickBooks' Transaction Type.
+        """The row's own Policy type column, which is the Transaction Type.
 
-        This is the dashboard's Type column, not the sheet's "Policy type".
-        The tab is always exactly "New Biz" or "Renewal", whereas Policy type
-        is free text that is often blank or says something else entirely.
+        That column is a dropdown holding the same words as QuickBooks' list,
+        so the row states its transaction type outright. The tab it arrived on
+        cannot: every row on the renewal tab looks like a renewal, even the
+        ones that are really a rewrite, an endorsement or a cancellation.
+
+        A row whose column is still blank falls back to the tab, so rows filled
+        in before the dropdown existed keep working.
         """
+        chosen = self._extra("policy_type")
+        if chosen:
+            return chosen
+        return self.tab_transaction_type
+
+    @property
+    def tab_transaction_type(self) -> str:
+        """What the tab alone says the row is - the fallback, not the answer."""
         value = self.source_tab.strip().casefold()
         if not value:
             return ""

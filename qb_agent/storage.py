@@ -400,6 +400,19 @@ class Store:
             ).rowcount
         return bool(changed)
 
+    def forget_invoice(self, source_id: str, mode: str, kind: str) -> bool:
+        """Drop what this machine remembers about one kind of invoice on a row.
+
+        Used when the sheet puts that invoice back in the queue. As with the
+        customer, the memory is a shortcut and the sheet has overruled it.
+        """
+        with self.connection() as connection:
+            changed = connection.execute(
+                "DELETE FROM invoice_state WHERE source_id=? AND mode=? AND kind=?",
+                (source_id, mode, kind),
+            ).rowcount
+        return bool(changed)
+
     def clear_override(self, source_id: str, field: str) -> None:
         with self.connection() as connection:
             connection.execute(

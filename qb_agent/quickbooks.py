@@ -12,6 +12,7 @@ it is holding, and dry-run mode exercises exactly the same code path.
 from __future__ import annotations
 
 import os
+import re
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from hashlib import sha1
@@ -27,6 +28,24 @@ from .qbxml import (
     parse_invoice_matches,
     parse_response,
 )
+
+# Starts a note that the person has to see, not just one for the detail log.
+# The invoice was still made, so it is not an error - but something on it is
+# not what the row asked for, and "Invoice created." alone would hide that.
+WARNING = "Warning: "
+
+# The longest name QuickBooks allows on its Ship Via list, which the invoice
+# templates label "Transaction Type".
+MAX_SHIP_VIA_NAME = 15
+
+# What every fees invoice carries in its number box, instead of the policy
+# number. The policy number goes in the Memo - see fees_memo().
+FEES_REF_NUMBER = "Fee"
+
+
+def fees_memo(policy_number: str) -> str:
+    """The Memo on a fees invoice: its only link back to the policy."""
+    return f"Policy #: {policy_number.strip()}"
 
 
 class QuickBooksError(RuntimeError):
@@ -62,7 +81,9 @@ class QuickBooksGateway(Protocol):
     def create_job(self, record: WorkRecord, parent: CustomerEntity) -> CustomerEntity: ...
     def find_invoice(self, ref_number: str) -> InvoiceEntity | None: ...
     def create_invoice(self, record: WorkRecord, customer_list_id: str) -> InvoiceEntity: ...
-    def find_policy_invoice(self, ref_number: str, kind: str) -> InvoiceEntity | None: ...
+    def find_policy_invoice(
+        self, ref_number: str, kind: str, job_list_id: str = "", policy_number: str = ""
+    ) -> InvoiceEntity | None: ...
     def create_policy_invoice(
         self, record: WorkRecord, job_list_id: str, kind: str
     ) -> tuple[InvoiceEntity, list[str]]: ...
@@ -222,6 +243,7 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         commission: InvoiceKindConfig | None = None,
         fees: InvoiceKindConfig | None = None,
         transaction_types: TransactionTypeConfig | None = None,
+        source_aliases: dict[str, str] | None = None,
     ):
         self.transport = RequestProcessorTransport(company_file, app_name)
         self.builder = QbxmlBuilder(qbxml_version)
@@ -230,9 +252,14 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         self.commission = commission or InvoiceKindConfig("", "")
         self.fees = fees or InvoiceKindConfig("", "")
         self.transaction_types = transaction_types or TransactionTypeConfig()
+        # Sheet spelling -> the rep it means, as the settings name them.
+        self.source_aliases = {
+            _rep_key(said): meant for said, meant in (source_aliases or {}).items()
+        }
         # These lists are read once per session, not once per invoice.
-        self._terms: dict[str, str] | None = None
+        self._transaction_types: dict[str, str] | None = None
         self._reps: dict[str, str] | None = None
+        self._rep_names: dict[str, str] = {}
         self._items: dict[str, str] | None = None
 
     def __enter__(self) -> "DesktopQuickBooksGateway":
@@ -331,26 +358,53 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
             response.customer_list_id or customer_list_id,
         )
 
-    def find_policy_invoice(self, ref_number: str, kind: str) -> InvoiceEntity | None:
-        """The invoice of this kind carrying this policy number, if any.
+    def find_policy_invoice(
+        self, ref_number: str, kind: str, job_list_id: str = "", policy_number: str = ""
+    ) -> InvoiceEntity | None:
+        """The invoice of this kind for this policy, if one already exists.
 
         A policy's premium and commission invoices share its number, so the
         A/R account is what tells them apart.
+
+        Fees invoices are all numbered "Fee", so the number says nothing about
+        which policy one belongs to. They are looked for on the policy's job
+        instead, and told apart by the policy number in their Memo. A fees
+        invoice made before that change still carries the policy number as
+        its number, so that is tried as well - and updating it renames it.
         """
+        wanted = _fold(self.kind_config(kind).ar_account)
+        if kind == "fees" and job_list_id:
+            xml = self.transport.request(self.builder.invoice_query_for_job(job_list_id))
+            self._raise_on_error(xml)
+            memo = _fold(fees_memo(policy_number or ref_number))
+            for match in parse_invoice_matches(xml):
+                if wanted and _fold(match["ar_account"]) != wanted:
+                    continue
+                if _fold(match["ref_number"]) != _fold(FEES_REF_NUMBER):
+                    continue
+                if _fold(match["memo"]) != memo:
+                    continue
+                return _entity(match, ref_number)
         xml = self.transport.request(self.builder.invoice_query(ref_number))
         self._raise_on_error(xml)
-        wanted = _fold(self.kind_config(kind).ar_account)
-        for match in parse_invoice_matches(xml):
-            if wanted and _fold(match["ar_account"]) != wanted:
-                continue
-            return InvoiceEntity(
-                match["txn_id"],
-                match["ref_number"] or ref_number,
-                match["customer_list_id"] or None,
-                match["edit_sequence"],
-                match["line_id"],
-            )
-        return None
+        candidates = [
+            match
+            for match in parse_invoice_matches(xml)
+            if not wanted or _fold(match["ar_account"]) == wanted
+        ]
+        if not candidates:
+            return None
+        # One on the policy's own job wins. Taking the first of any job looked
+        # harmless while every policy had one invoice, but an invoice left on
+        # an older job - the same policy filed under a different Line of
+        # Business - was returned instead, the caller saw the wrong job and
+        # made a new invoice, and did so again on every send. That is how a
+        # policy ends up with twenty.
+        if job_list_id:
+            for match in candidates:
+                if match["customer_list_id"] == job_list_id:
+                    return _entity(match, ref_number)
+        return _entity(candidates[0], ref_number)
 
     def kind_config(self, kind: str):
         return {"commission": self.commission, "fees": self.fees}.get(kind, self.premium)
@@ -358,6 +412,7 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
     def _spec(self, record: WorkRecord, kind: str, notes: list[str]) -> InvoiceSpec:
         """Turn the row into the values this kind of invoice carries."""
         settings = self.kind_config(kind)
+        ref_number = memo = ""
         if kind == "commission":
             item = self._resolve_item(record.commission_item, settings, notes)
             description = record.commission_description
@@ -367,6 +422,11 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
             item = self._resolve_item(settings.item, settings, notes)
             description = record.fees_description
             amount = record.fees_amount
+            # Numbered "Fee" rather than with the policy number, as the office
+            # numbers them. The policy number moves to the Memo, which is also
+            # how the invoice is found again when the row is sent a second time.
+            ref_number = FEES_REF_NUMBER
+            memo = fees_memo(record.invoice_number)
         else:
             # The row says which of the two it is; the settings say what that
             # one is called in this company file.
@@ -381,12 +441,10 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
             class_name=record.premium_class,
             template=settings.template,
             ar_account=settings.ar_account,
-            # The row says which tab it came from; the settings say what
-            # QuickBooks calls that on its Transaction Type list.
-            terms=self._resolve_terms(
-                self.transaction_types.name_for(record.source_tab), notes
-            ),
+            transaction_type=self._resolve_transaction_type(record, notes),
             sales_rep=self._resolve_sales_rep(record.lead_source, notes),
+            ref_number=ref_number,
+            memo=memo,
         )
 
     def create_policy_invoice(
@@ -495,37 +553,90 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
     # list entry that does not exist is rejected outright, so anything missing
     # is added first - and said out loud, never silently.
 
-    def _resolve_terms(self, value: str, notes: list[str]) -> str:
-        if not value:
+    def _resolve_transaction_type(self, record: WorkRecord, notes: list[str]) -> str:
+        """Find the row's Transaction Type on QuickBooks' Ship Via list.
+
+        The row's own Policy type column is asked first, because that is where
+        somebody states what the transaction actually is. Which tab it arrived
+        on is only the fallback, for rows filled in before that column became a
+        dropdown.
+
+        Never created. The other lists here are filled in as rows need them,
+        because a missing customer or item is just work not done yet. This one
+        is different: it is a fixed vocabulary somebody set up deliberately -
+        New Business, Endorsement, Cancellation, Rewrite - and a name that is
+        not on it means a row or a setting is wrong, not that the list is
+        short. Adding it would bury a typo in QuickBooks where nobody looks.
+        """
+        wanted = [record.transaction_type]
+        fallback = self.transaction_types.name_for(record.source_tab)
+        if fallback and fallback.casefold() != wanted[0].casefold():
+            wanted.append(fallback)
+        if not wanted[0]:
             return ""
-        if self._terms is None:
-            xml = self.transport.request(self.builder.terms_list())
+        if self._transaction_types is None:
+            xml = self.transport.request(self.builder.ship_method_list())
             self._raise_on_error(xml)
-            self._terms = {
-                name.casefold(): name for name in _texts(xml, "StandardTermsRet", "Name")
+            self._transaction_types = {
+                name.casefold(): name for name in _texts(xml, "ShipMethodRet", "Name")
             }
-        existing = self._terms.get(value.casefold())
-        if existing:
+        for index, value in enumerate(wanted):
+            # Cut to the list's own limit first. QuickBooks stops a Ship Via
+            # name at 15 characters, so "Renewal Business" can only ever be
+            # stored as "Renewal Busines" - the same name, not a typo, and not
+            # worth a warning on every invoice.
+            existing = self._transaction_types.get(
+                value.strip()[:MAX_SHIP_VIA_NAME].casefold()
+            )
+            if not existing:
+                continue
+            if index and record.transaction_type != record.tab_transaction_type:
+                # Only worth saying when the row itself asked for something
+                # else. A blank Policy type falling back to its tab is the
+                # expected path for older rows, not a problem to report.
+                notes.append(
+                    f"{WARNING}The row's Policy type '{wanted[0]}' is not on this "
+                    f"company's Transaction Type list, so '{existing}' was used instead."
+                )
             return existing
-        name = value[:31]
-        try:
-            self._send(self.builder.terms_add(name))
-        except QuickBooksError as exc:
-            notes.append(f"Transaction Type '{value}' could not be added to the Terms list: {exc}")
-            return ""
-        self._terms[name.casefold()] = name
-        notes.append(f"Added '{name}' to the QuickBooks Terms list (Transaction Type).")
-        return name
+        # Nothing matched exactly. A single letter out - "Renewal Business"
+        # against a list entry typed "Renewal Busines" - is almost certainly
+        # the same thing, and leaving the box empty over it helps nobody. It
+        # is accepted only when exactly one entry is that close, so it can
+        # never choose between two, and it is reported so the typo gets fixed.
+        for value in wanted:
+            close = _one_letter_away(value, self._transaction_types.values())
+            if close:
+                notes.append(
+                    f"{WARNING}Transaction Type '{value}' is not spelled the same as "
+                    f"QuickBooks' '{close}', which was used. Correct one of the two "
+                    "so they match exactly."
+                )
+                return close
+        known = ", ".join(sorted(self._transaction_types.values())) or "(the list is empty)"
+        notes.append(
+            f"{WARNING}Transaction Type '{wanted[0]}' is not on this company's list, so "
+            f"the invoice was left without one. The list holds: {known}."
+        )
+        return ""
 
     def _resolve_sales_rep(self, value: str, notes: list[str]) -> str:
-        """Find - or create - the rep whose initials the invoice will carry."""
+        """Find - or create - the rep whose initials the invoice will carry.
+
+        A cell can name more than one - "Cross Sell, Ahmed", "Dilshad /
+        Razia" - and Source holds one. The first that is already a rep wins;
+        only if none is does the first name get added.
+        """
         if not value:
             return ""
         if self._reps is None:
             self._load_reps()
-        found = self._reps.get(value.casefold())
-        if found:
-            return found
+        parts = [part.strip() for part in re.split(r"[,/]", value) if part.strip()]
+        for part in parts or [value]:
+            found = self._known_rep(part)
+            if found:
+                return found
+        value = (parts or [value])[0]
         initial = self._free_initial(value)
         try:
             # The rep needs a person behind it; an Other Name is the lightest.
@@ -538,7 +649,9 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
             notes.append(f"Source '{value}' could not be added to the Rep list: {exc}")
             return ""
         self._reps[value.casefold()] = initial
+        self._reps[_rep_key(value)] = initial
         self._reps[initial.casefold()] = initial
+        self._rep_names[_rep_key(value)] = initial
         notes.append(f"Added rep '{initial}' for '{value}' to the QuickBooks Rep list (Source).")
         return initial
 
@@ -546,14 +659,48 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         xml = self.transport.request(self.builder.sales_rep_list())
         self._raise_on_error(xml)
         self._reps = {}
+        # Full name -> initials, kept apart so a bare first name can be tried
+        # against the people, not against other initials.
+        self._rep_names: dict[str, str] = {}
         for node in ET.fromstring(xml).iter("SalesRepRet"):
             initial = (node.findtext("Initial") or "").strip()
             if not initial:
                 continue
             entity = (node.findtext("SalesRepEntityRef/FullName") or "").strip()
             self._reps[initial.casefold()] = initial
+            self._reps[_rep_key(initial)] = initial
             if entity:
                 self._reps[entity.casefold()] = initial
+                # "Sunil Dosi." in QuickBooks is "Sunil Dosi" in the sheet.
+                # Matched exactly, the full stop made a second rep for the
+                # same person, and QuickBooks cannot merge them afterwards.
+                self._reps[_rep_key(entity)] = initial
+                self._rep_names[_rep_key(entity)] = initial
+
+    def _known_rep(self, value: str) -> str:
+        """The initials of an existing rep this name means, or "".
+
+        Tried in order: a spelling the office has said means someone else
+        ("Tahir" is Taher), the name exactly, the name ignoring case and full
+        stops, and a lone first name that belongs to only one rep.
+        """
+        value = self.source_aliases.get(_rep_key(value), value)
+        return (
+            self._reps.get(value.casefold())
+            or self._reps.get(_rep_key(value))
+            or self._rep_by_first_name(value)
+        )
+
+    def _rep_by_first_name(self, value: str) -> str:
+        """A lone first name that belongs to exactly one rep: "Munira"."""
+        key = _rep_key(value)
+        if not key or " " in key:
+            return ""
+        found = {
+            initial for name, initial in self._rep_names.items()
+            if name.split(" ", 1)[0] == key
+        }
+        return found.pop() if len(found) == 1 else ""
 
     def _free_initial(self, value: str) -> str:
         """Initials are capped at 5 characters, so collisions are real."""
@@ -579,7 +726,11 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
             "templates": (self.builder.template_list(), "TemplateRet", "Name"),
             "items": (self.builder.service_item_list(), "ItemServiceRet", "FullName"),
             "classes": (self.builder.class_list(), "ClassRet", "FullName"),
-            "terms": (self.builder.terms_list(), "StandardTermsRet", "Name"),
+            # Ship Via, because that is the field the templates label
+            # "Transaction Type". Checking Terms passed while the invoices came
+            # out blank, which is the worst kind of pre-flight: reassuring and
+            # about the wrong list.
+            "transaction_types": (self.builder.ship_method_list(), "ShipMethodRet", "Name"),
             "reps": (self.builder.sales_rep_list(), "SalesRepRet", "Initial"),
         }
         found: dict[str, set[str]] = {}
@@ -680,7 +831,9 @@ class DryRunQuickBooksGateway(AbstractContextManager["DryRunQuickBooksGateway"])
         self.invoices[record.invoice_number.casefold()] = entity
         return entity
 
-    def find_policy_invoice(self, ref_number: str, kind: str) -> InvoiceEntity | None:
+    def find_policy_invoice(
+        self, ref_number: str, kind: str, job_list_id: str = "", policy_number: str = ""
+    ) -> InvoiceEntity | None:
         return self.invoices.get(f"{kind}|{ref_number.casefold()}")
 
     def create_policy_invoice(
@@ -858,6 +1011,60 @@ def _texts(xml: str, node_tag: str, child_tag: str) -> list[str]:
         for node in ET.fromstring(xml).iter(node_tag)
         if (text := node.findtext(child_tag) or "").strip()
     ]
+
+
+def _rep_key(value: str) -> str:
+    """A name as it is compared on the Rep list: case, full stops and spacing
+    are how two people typed it, not who it is."""
+    kept = "".join(char if char.isalnum() else " " for char in value.casefold())
+    return " ".join(kept.split())
+
+
+def _entity(match: dict[str, str], ref_number: str) -> InvoiceEntity:
+    return InvoiceEntity(
+        match["txn_id"],
+        match["ref_number"] or ref_number,
+        match["customer_list_id"] or None,
+        match["edit_sequence"],
+        match["line_id"],
+    )
+
+
+def _one_letter_away(value: str, names) -> str:
+    """The one name that differs from value by a single letter, if only one does.
+
+    A letter added, dropped or changed, ignoring case. Two candidates that
+    close means the choice is a guess, so neither is returned; short words are
+    left alone because one letter is too large a share of them to be a typo.
+    """
+    wanted = value.strip().casefold()
+    if len(wanted) < 6:
+        return ""
+    found = [name for name in names if _within_one_edit(wanted, name.strip().casefold())]
+    return found[0] if len(found) == 1 else ""
+
+
+def _within_one_edit(a: str, b: str) -> bool:
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) > len(b):
+        a, b = b, a
+    i = j = 0
+    edited = False
+    while i < len(a) and j < len(b):
+        if a[i] == b[j]:
+            i += 1
+            j += 1
+            continue
+        if edited:
+            return False
+        edited = True
+        if len(a) == len(b):
+            i += 1          # a letter changed
+        j += 1              # or one added in the longer word
+    return True
 
 
 def _fake_id(kind: str, value: str) -> str:

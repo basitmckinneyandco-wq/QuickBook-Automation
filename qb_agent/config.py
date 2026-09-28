@@ -81,9 +81,11 @@ class TransactionTypeConfig:
 class InvoiceKindConfig:
     """Where one kind of policy invoice lands in QuickBooks.
 
-    "Transaction Type" and "Source" are not settings: the templates rename the
-    built-in Terms and Rep fields to those labels, so the app writes TermsRef
-    and SalesRepRef and there is nothing to configure.
+    "Transaction Type" and "Source" are not settings: every template here
+    renames the built-in Ship Via and Rep fields to those labels, so the app
+    writes ShipMethodRef and SalesRepRef and there is nothing to configure.
+    Not Terms, which is the field the label "Transaction Type" suggests but
+    which none of these templates display.
     """
 
     template: str
@@ -122,6 +124,10 @@ class AppConfig:
         default_factory=lambda: GoogleSheetConfig(key_file="", spreadsheet_id="")
     )
     transaction_types: TransactionTypeConfig = field(default_factory=TransactionTypeConfig)
+    # Lead source as the sheet spells it -> the rep it means in QuickBooks.
+    # For the same person written two ways ("Tahir" in the sheet is "Taher"),
+    # which no amount of ignoring case or punctuation can tell apart.
+    source_aliases: tuple[tuple[str, str], ...] = ()
     # Where this came from, so the app can write a change back to the same file.
     source_path: str = ""
 
@@ -210,6 +216,10 @@ def load_config(filename: str | Path) -> AppConfig:
         transaction_types=TransactionTypeConfig(
             new_biz=str(invoice.get("transaction_types", {}).get("new_biz", "New Biz")),
             renewal=str(invoice.get("transaction_types", {}).get("renewal", "Renewal")),
+        ),
+        source_aliases=tuple(
+            (str(said), str(meant))
+            for said, meant in (invoice.get("source_aliases") or {}).items()
         ),
         company=CompanyConfig(
             display_name=str(company.get("display_name", "My Company")),

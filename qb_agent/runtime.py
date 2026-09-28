@@ -16,6 +16,7 @@ from .gsheets import Sheets, SheetsError, column_letter, status_columns
 from .models import INVOICE_KINDS, Operation, WorkRecord
 from .processor import Processor
 from .quickbooks import (
+    MAX_SHIP_VIA_NAME,
     DesktopQuickBooksGateway,
     DryRunQuickBooksGateway,
     RequestProcessorTransport,
@@ -48,6 +49,12 @@ _RESET = "__reset__"
 
 # The four columns a dashboard writes, as the rows carry them.
 STATUS_FIELDS = ("qb_customer_job", "qb_premium", "qb_commission", "qb_fees")
+
+# Words that record something having happened, and so may be written back into
+# the sheet on their own. "Pending" and "Needs review" are deliberately absent:
+# they say the app has nothing to report, and sending them every few seconds
+# would overwrite whatever a person is in the middle of typing.
+_SETTLED = frozenset({"Created", "Failed", "Not needed"})
 
 # How often those columns are re-read straight from the sheet. Two seconds a
 # read, so this can run often: someone typing a status into the sheet expects
@@ -102,6 +109,10 @@ class Runtime:
         # come from the published link and so carry no true row number.
         self._row_index: dict[str, dict[tuple[str, str, str], int]] = {}
         self._lookup_at = 0.0
+        # (policy, status column) -> when this machine last finished writing
+        # that cell. A read of the sheet that began before then may have been
+        # answered from before the write, so it says nothing about that cell.
+        self._written_at: dict[tuple[str, str], float] = {}
 
     def _gateway(self):
         if self.config.mode == "quickbooks":
@@ -114,6 +125,7 @@ class Runtime:
                 commission=self.config.commission,
                 fees=self.config.fees,
                 transaction_types=self.config.transaction_types,
+                source_aliases=dict(self.config.source_aliases),
             )
         return self._dry_gateway
 
@@ -179,6 +191,7 @@ class Runtime:
         payload: list[dict[str, object]] = []
         for record in self.records.values():
             item = record.to_dict()
+            item["transaction_type"] = self._shown_transaction_type(record)
             state = states.get(record.source_id)
             if _is_obsolete_name_limit_review(state):
                 state = None
@@ -226,17 +239,17 @@ class Runtime:
         # a row that cannot be sent would be the dashboard lying politely.
         said = elsewhere.get("qb_customer_job")
         if said == _RESET:
-            # "Pending" is somebody saying this one still needs doing, and it
-            # wins outright - including over this machine's own record of
-            # having done it. That is the point of the column: a second person,
-            # or a second company, can put a row back in the queue.
+            # Pending has already done its work by the time we get here:
+            # honour_resets() deletes this machine's record of the row the
+            # moment it sees the word. So a record that still exists was made
+            # AFTER the reset - the work was done since - and it is the newer
+            # fact of the two.
             #
-            # It is only safe to obey because the sheet is read directly. Read
-            # through the published link, which lags a minute behind, a send
-            # would be followed by a read that still said Pending and would
-            # undo itself.
-            state = None
-            said = ""           # then judged on the row, below
+            # Discarding it here as well was what trapped a row in Pending: the
+            # send succeeded, the sheet still said Pending for a moment, the
+            # dashboard therefore showed Pending, and the sync wrote that back.
+            # Round it went, with a customer sitting in QuickBooks all the while.
+            said = ""           # judged on the record below, or on the row
         # Same for the customer: a refusal is about the row, and the row can be
         # corrected.
         if state is not None and state.status == "needs_review":
@@ -265,8 +278,9 @@ class Runtime:
                 saved = None
             from_sheet = elsewhere.get(f"qb_{kind}")
             if from_sheet == _RESET:
-                saved = None        # same as above: Pending puts it back in the queue
-                from_sheet = ""     # then judged on the row, below
+                # Same as above: the reset has already cleared any mark, so a
+                # mark that is still here was made since, and stands.
+                from_sheet = ""
             if saved is not None:
                 item[f"{kind}_txn_id"] = saved.txn_id
                 item[f"{kind}_ref_number"] = saved.ref_number
@@ -426,8 +440,9 @@ class Runtime:
                 if done.get("unplaced"):
                     self.sheet_write_error = (
                         f"{done['unplaced']} status(es) could not be written: their row "
-                        "could not be told apart from another with the same corporation, "
-                        "policy number and effective date."
+                        "in the sheet could not be identified - either no row matches "
+                        "the corporation, policy number and effective date, or more "
+                        "than one does and writing to either would be a guess."
                     )
                     print(f"Sheet: {self.sheet_write_error}", flush=True)
             except Exception as exc:
@@ -659,8 +674,21 @@ class Runtime:
                 updated.append(self._record_payload(changed))
             return {"updated": updated, "failed": failed}
 
+    def _shown_transaction_type(self, record: WorkRecord) -> str:
+        """The Type column: what will actually go on the invoice.
+
+        The row's own Policy type column when it has one, and otherwise the
+        name the settings give this tab. Showing the bare tab name instead left
+        the dashboard saying one thing and the invoice another, with no way to
+        tell from the screen which would be used.
+        """
+        return record.transaction_type or self.config.transaction_types.name_for(
+            record.source_tab
+        )
+
     def _record_payload(self, record: WorkRecord) -> dict[str, object]:
         item = record.to_dict()
+        item["transaction_type"] = self._shown_transaction_type(record)
         state = self.store.get(record.source_id, self.config.mode)
         if _is_obsolete_name_limit_review(state):
             state = None
@@ -721,10 +749,24 @@ class Runtime:
         for name in (self.config.premium.item_standard, self.config.premium.item_non_standard):
             check(f"Premium item '{name}'", name, found["items"], "Item List")
 
+        # Checked, not added on demand. This list is a vocabulary somebody set
+        # up - New Business, Endorsement, Rewrite - so a name that is not on it
+        # is a typo in the settings, and the invoice would come out blank.
+        # Cut to 15 characters as QuickBooks cuts it, so "Renewal Business"
+        # in the settings is recognised as the list's "Renewal Busines".
+        for name in (self.config.transaction_types.new_biz, self.config.transaction_types.renewal):
+            check(
+                f"Transaction Type '{name}'",
+                name.strip()[:MAX_SHIP_VIA_NAME],
+                found["transaction_types"],
+                "Ship Via List",
+            )
+
         # These the app adds on demand, so they are reported, never failed.
         notes = [
             {"label": "Classes", "value": _join(found["classes"]), "where": "Class List"},
-            {"label": "Transaction Types", "value": _join(found["terms"]), "where": "Terms List"},
+            {"label": "Transaction Types", "value": _join(found["transaction_types"]),
+             "where": "Ship Via List"},
             {"label": "Sources", "value": _join(found["reps"]), "where": "Rep List"},
             {"label": "Carrier items", "value": f"{len(found['items'])} in the Item List",
              "where": "Item List"},
@@ -768,11 +810,6 @@ class Runtime:
                 selected.append(record)
             if not selected:
                 return unknown
-
-            # Last chance to obey a Pending someone typed into the sheet: the
-            # sender reads the local marks, not the screen, so a mark the sheet
-            # has already overruled has to be gone before the batch starts.
-            self.honour_resets()
 
             queue = [record.source_id for record in selected]
             finished: list[dict[str, object]] = []
@@ -878,6 +915,7 @@ class Runtime:
             rows = list(self.records.values())
 
         updates: list[tuple[str, str]] = []
+        noted: list[tuple[str, str, str]] = []
         unplaced = 0
         for record in rows:
             state = states.get(record.source_id)
@@ -921,7 +959,7 @@ class Runtime:
                     unplaced += 1
                     continue
                 updates.append((cell, word))
-                self._remember(record.source_id, column, word)
+                noted.append((record.source_id, column, word))
             if len(updates) >= limit:
                 break
 
@@ -931,10 +969,26 @@ class Runtime:
             for start in range(0, len(updates), 500):
                 written += self._sheets().write(updates[start:start + 500])
         except SheetsError as exc:
+            # Nothing is noted as written, so memory keeps matching the sheet
+            # and a later read cannot mistake the old word for a fresh edit.
             self.sheet_write_error = str(exc)
             return {"written": written, "error": str(exc)}
+        for source_id, column, word in noted:
+            self._remember(source_id, column, word)
+        self._wrote((source_id, column) for source_id, column, _ in noted)
         self.sheet_write_error = ""
         return {"written": written, "rows": len(rows), "unplaced": unplaced}
+
+    def _held(self, source_id: str, column: str) -> str:
+        """What this machine believes the sheet says in one status cell."""
+        record = self.records.get(source_id)
+        return str(dict(record.extra).get(column, "")).strip() if record else ""
+
+    def _wrote(self, cells) -> None:
+        """Stamp cells as just written, once the sheet has confirmed the write."""
+        now = monotonic()
+        for key in cells:
+            self._written_at[key] = now
 
     def _remember(self, source_id: str, column: str, word: str) -> None:
         """Note what the sheet now says about one row, having just written it."""
@@ -950,8 +1004,9 @@ class Runtime:
     def _cell_for(self, record: WorkRecord, column: str) -> str:
         """The A1 address of one status column on one policy's row."""
         row = self._sheet_row(record)
-        index = self._status_columns.get(record.source_tab, {}).get(column)
-        title = self.config.google_sheet.tab_titles.get(record.source_tab, "")
+        label = self._tab_label(record.source_tab)
+        index = self._status_columns.get(label, {}).get(column)
+        title = self.config.google_sheet.tab_titles.get(label, "")
         if row < 1 or index is None or not title:
             return ""
         return f"'{title}'!{column_letter(index)}{row}"
@@ -962,6 +1017,7 @@ class Runtime:
         if not (settings.enabled and settings.write_status and results):
             return
         updates: list[tuple[str, str]] = []
+        touched: list[tuple[str, str, str]] = []     # (policy, column, word before)
         for item in results:
             source_id = str(item.get("source_id", ""))
             operation = str(item.get("operation", ""))
@@ -975,6 +1031,7 @@ class Runtime:
                 # result of the very send that produced it.
                 column = self._STATUS_FIELD.get(operation, "")
                 if column:
+                    touched.append((source_id, column, self._held(source_id, column)))
                     self._remember(source_id, column, word)
         if not updates:
             return
@@ -982,8 +1039,14 @@ class Runtime:
             self._sheets().write(updates)
         except SheetsError as exc:
             self.sheet_write_error = str(exc)
+            # The sheet still says what it said. Believing otherwise is how a
+            # failed write turned into a reset: the next read saw the old
+            # "Pending", took it for somebody typing it, and wiped the work.
+            for source_id, column, before in touched:
+                self._remember(source_id, column, before)
         else:
             self.sheet_write_error = ""
+            self._wrote((source_id, column) for source_id, column, _ in touched)
 
     def _status_cell(self, source_id: str, operation: str) -> str:
         """The A1 address of one row's status column, or "" if it cannot be found."""
@@ -992,6 +1055,32 @@ class Runtime:
         if record is None or not field:
             return ""
         return self._cell_for(record, field)
+
+    def _tab_label(self, source_tab: str) -> str:
+        """Which configured tab a row's own tab name means.
+
+        The rows arrive naming their tab the way the published link names it -
+        "Renewal" - while the settings name the same tab "Renewal Business".
+        Compared directly the two never match, and the effect is not a tab with
+        no rows: it is every row on that tab becoming impossible to find in the
+        sheet, so no status can be read from it or written to it. Matched
+        exactly first, then ignoring case, then on the one thing that actually
+        separates the two tabs - whether it is the renewal one.
+        """
+        titles = self.config.google_sheet.tab_titles
+        if source_tab in titles:
+            return source_tab
+        wanted = source_tab.strip().casefold()
+        if not wanted:
+            return ""
+        for label in titles:
+            if label.strip().casefold() == wanted:
+                return label
+        renewal = "renew" in wanted
+        for label in titles:
+            if ("renew" in label.casefold()) == renewal:
+                return label
+        return ""
 
     def _sheet_row(self, record: WorkRecord) -> int:
         """Which row of the real spreadsheet this policy is.
@@ -1006,38 +1095,33 @@ class Runtime:
         """
         if self.config.google_sheet.read_rows:
             return record.row_number
-        found = self._row_lookup(record.source_tab).get(_policy_key(record))
+        found = self._row_lookup(self._tab_label(record.source_tab)).get(_policy_key(record))
         return found[0] if found else 0
 
-    def honour_resets(self) -> int:
-        """Make a Pending in the sheet undo a local mark, not merely hide it.
+    def honour_resets(self, targets: list[tuple[str, str]]) -> int:
+        """Act on somebody typing Pending into the sheet.
 
-        The dashboard already reads Pending as "this one still needs doing",
-        but that was only how the row was shown. The sender looks at the local
-        marks directly, so a premium marked "not needed" here stayed skipped:
-        the row read Pending, Send was pressed, and the premium came straight
-        back as Not needed. The mark has to actually go.
+        Each target is one row and one column that has *just changed* to
+        Pending. It matters that this is an event and not a standing state: a
+        cell that simply says Pending must not keep deleting the record of work
+        done since, or a row could be sent, created in QuickBooks, and wiped
+        from this machine's memory a few seconds later, over and over.
+
+        What goes is this machine's memory of the work - the customer record
+        that would make a send skip the row, or a mark on an invoice. The row
+        is then free to say what it is, and the next send really does send.
         """
-        ids = list(self.records)
-        if not ids:
-            return 0
-        held = self.store.invoice_states(ids, self.config.mode)
         cleared = 0
-        for source_id, record in self.records.items():
-            said = self._sheet_says(record)
-            # The customer's own record goes too. A send checks this memory
-            # first and skips a row it says is done - without asking
-            # QuickBooks - so a row put back in the queue would be skipped for
-            # ever, even if the customer had since been deleted there.
-            if said.get("qb_customer_job") == _RESET:
+        for source_id, column in targets:
+            if source_id not in self.records:
+                continue
+            if column == "qb_customer_job":
                 if self.store.forget_record(source_id, self.config.mode):
                     cleared += 1
-            for kind in INVOICE_KINDS.values():
-                if said.get(f"qb_{kind}") != _RESET:
-                    continue
-                state = held.get(source_id, {}).get(kind)
-                if state is not None and state.status == "not_needed":
-                    self.store.set_invoice_needed(source_id, self.config.mode, kind, True)
+                continue
+            kind = column.removeprefix("qb_")
+            if kind in set(INVOICE_KINDS.values()):
+                if self.store.forget_invoice(source_id, self.config.mode, kind):
                     cleared += 1
         return cleared
 
@@ -1054,26 +1138,102 @@ class Runtime:
         if not settings.enabled or settings.read_rows:
             return 0        # reading the sheet directly is already this fresh
         changed = 0
+        # Cells that have only now become Pending. A reset is the moment of
+        # the change, not the word sitting there afterwards.
+        newly_reset: list[tuple[str, str]] = []
         for label in settings.tab_titles:
+            # Taken before asking, not after: what matters is whether the sheet
+            # could have answered from before one of our own writes landed.
+            asked_at = monotonic()
             index = self._row_lookup(label, force=True)
             if not index:
                 continue
             for record in list(self.records.values()):
-                if record.source_tab != label:
+                if self._tab_label(record.source_tab) != label:
                     continue
                 found = index.get(_policy_key(record))
                 said = found[1] if found else {}
                 for column, word in said.items():
-                    if str(dict(record.extra).get(column, "")).strip() != word:
-                        self._remember(record.source_id, column, word)
-                        changed += 1
+                    if str(dict(record.extra).get(column, "")).strip() == word:
+                        continue
+                    # This machine wrote this cell after the read began, so
+                    # the answer may predate the write. Believing it is how a
+                    # premium, created seconds earlier, was read back as the
+                    # old "Pending", taken for a reset and wiped. The next
+                    # read, begun after the write, settles it.
+                    if self._written_at.get((record.source_id, column), 0.0) >= asked_at:
+                        continue
+                    self._remember(record.source_id, column, word)
+                    changed += 1
+                    if self._SHEET_STATUS.get(word.strip().casefold()) == _RESET:
+                        newly_reset.append((record.source_id, column))
+        if newly_reset:
+            self.honour_resets(newly_reset)
+        # Now the other direction, in the same pass: a row this machine has
+        # really done, whose cell in the sheet still says otherwise.
+        changed += self._push_settled()
         if changed:
-            self.honour_resets()
             # The page only pulls the rows again when this moves. Without it
             # the app knew a colleague's status within the minute but the
             # screen kept the old one until somebody pressed Refresh.
             self.revision += 1
         return changed
+
+    def _push_settled(self) -> int:
+        """Tell the sheet about work this machine has actually done.
+
+        Only settled facts travel this way: Created, Failed, and a Not needed
+        somebody chose. Never Pending, and never Needs review - those are the
+        app's reading of a row rather than a record of anything happening, and
+        writing them back every quarter minute would be the app arguing with
+        whoever is typing in the sheet. The deliberate Sync button still writes
+        the full picture; this only stops a row that was created in QuickBooks
+        from sitting in the sheet as Pending for ever.
+        """
+        settings = self.config.google_sheet
+        if not (settings.enabled and settings.write_status):
+            return 0
+        with self._lock:
+            states = self.store.states_for(list(self.records), self.config.mode)
+            invoices = self.store.invoice_states(list(self.records), self.config.mode)
+            rows = list(self.records.values())
+
+        updates: list[tuple[str, str]] = []
+        noted: list[tuple[str, str, str]] = []
+        for record in rows:
+            state = states.get(record.source_id)
+            if _is_obsolete_name_limit_review(state):
+                state = None
+            marks = invoices.get(record.source_id, {})
+            shown = self._state_payload(record, state, marks)
+            held = dict(record.extra)
+            for field, column in self._SHEET_FIELDS:
+                word = self._SHEET_WORD.get(str(shown.get(field, "")), "")
+                if word not in _SETTLED or str(held.get(column, "")).strip() == word:
+                    continue
+                if word == "Not needed":
+                    decided = marks.get(field.removesuffix("_status"))
+                    if decided is None or decided.status != "not_needed":
+                        continue        # nothing to bill is a reading, not a decision
+                cell = self._cell_for(record, column)
+                if not cell:
+                    continue            # two rows look alike; sync_sheet reports it
+                updates.append((cell, word))
+                noted.append((record.source_id, column, word))
+        if not updates:
+            return 0
+        try:
+            self._sheets().write(updates)
+        except SheetsError as exc:
+            # Nothing is noted as written: the next pass must try these again
+            # rather than believe the sheet says what it does not.
+            self.sheet_write_error = str(exc)
+            return 0
+        self.sheet_write_error = ""
+        for source_id, column, word in noted:
+            self._remember(source_id, column, word)
+        self._wrote((source_id, column) for source_id, column, _ in noted)
+        return len(updates)
 
     def _row_lookup(
         self, label: str, force: bool = False

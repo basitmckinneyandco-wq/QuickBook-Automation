@@ -269,25 +269,31 @@ class PremiumInvoiceTests(unittest.TestCase):
         self.assertEqual(add.findtext("Memo"), "Policy #: GL-2026-000123")
 
     def test_transaction_type_and_source_use_the_renamed_template_fields(self):
-        """The premium template renames Terms to "Transaction Type" and Rep to
-        "Source", so those two built-in fields are what we actually write."""
-        add = self.build(terms="Renewal", sales_rep="REFER")
-        self.assertEqual(add.findtext("TermsRef/FullName"), "Renewal")
+        """The templates rename Ship Via to "Transaction Type" and Rep to
+        "Source", so those two built-in fields are what we actually write.
+
+        Ship Via and not Terms, which is the trap: Terms is what the label
+        suggests, but the template never displays it, so writing there stores
+        the value where nobody can see it.
+        """
+        add = self.build(transaction_type="Renewal", sales_rep="REFER")
+        self.assertEqual(add.findtext("ShipMethodRef/FullName"), "Renewal")
         self.assertEqual(add.findtext("SalesRepRef/FullName"), "REFER")
+        self.assertIsNone(add.find("TermsRef"))
         # They sit between RefNumber and Memo in the schema.
         tags = [child.tag for child in add]
         self.assertEqual(
             tags,
             [
                 "CustomerRef", "ClassRef", "ARAccountRef", "TemplateRef", "TxnDate",
-                "RefNumber", "TermsRef", "SalesRepRef", "Memo", "InvoiceLineAdd",
+                "RefNumber", "SalesRepRef", "ShipMethodRef", "Memo", "InvoiceLineAdd",
             ],
         )
 
     def test_an_update_names_the_line_so_it_is_replaced_not_dropped(self):
         xml = BUILDER.policy_invoice_mod(
             PREMIUM,
-            premium_spec(terms="Renewal", sales_rep="REFER"),
+            premium_spec(transaction_type="Renewal", sales_rep="REFER"),
             "JOB-1", "TXN-1", "7", "TXN-1-1",
         )
         change = ET.fromstring(_body(xml)).find(".//InvoiceMod")
@@ -295,7 +301,7 @@ class PremiumInvoiceTests(unittest.TestCase):
             [child.tag for child in change],
             [
                 "TxnID", "EditSequence", "CustomerRef", "ClassRef", "ARAccountRef",
-                "TemplateRef", "TxnDate", "RefNumber", "TermsRef", "SalesRepRef",
+                "TemplateRef", "TxnDate", "RefNumber", "SalesRepRef", "ShipMethodRef",
                 "Memo", "InvoiceLineMod",
             ],
         )
@@ -324,21 +330,27 @@ class PremiumInvoiceTests(unittest.TestCase):
             self.assertIn("Notes", asked)
             self.assertIn("EditSequence", asked)
 
-    def test_transaction_type_comes_from_the_tab_not_the_policy_type_column(self):
-        """The Type column (which tab the row came from) is always exactly
-        "New Biz" or "Renewal"; the sheet's Policy type is free text that is
-        often blank or says something else, so it is not used here."""
-        renewal = replace(PREMIUM, source_tab="Renewal", extra=(("policy_type", "Rewrite"),))
-        self.assertEqual(renewal.transaction_type, "Renewal")
+    def test_transaction_type_comes_from_the_policy_type_column(self):
+        """The row's Policy type column is a dropdown of QuickBooks' own
+        transaction types, so it says what the transaction is. The tab cannot:
+        every row on the renewal tab looks like a renewal, including the ones
+        that are really a rewrite."""
+        rewrite = replace(PREMIUM, source_tab="Renewal", extra=(("policy_type", "Rewrite"),))
+        self.assertEqual(rewrite.transaction_type, "Rewrite")
 
-        new_biz = replace(PREMIUM, source_tab="New Biz", extra=(("policy_type", ""),))
-        self.assertEqual(new_biz.transaction_type, "New Biz")
+        named = replace(
+            PREMIUM, source_tab="Renewal", extra=(("policy_type", "Renewal Business"),)
+        )
+        self.assertEqual(named.transaction_type, "Renewal Business")
 
-        # Whatever the sheet's own column says is ignored.
-        odd = replace(PREMIUM, source_tab="New Biz", extra=(("policy_type", "Razia winback"),))
-        self.assertEqual(odd.transaction_type, "New Biz")
+        # A row whose column is still blank falls back to its tab.
+        blank = replace(PREMIUM, source_tab="New Biz", extra=(("policy_type", ""),))
+        self.assertEqual(blank.transaction_type, "New Biz")
+        self.assertEqual(
+            replace(PREMIUM, source_tab="Renewal", extra=()).transaction_type, "Renewal"
+        )
 
-        self.assertEqual(replace(PREMIUM, source_tab="").transaction_type, "")
+        self.assertEqual(replace(PREMIUM, source_tab="", extra=()).transaction_type, "")
 
     def test_a_rep_initial_is_capped_at_five_characters(self):
         xml = BUILDER.sales_rep_add("EXISTINGLONG", "Existing insured - new project")
@@ -360,6 +372,264 @@ class PremiumInvoiceTests(unittest.TestCase):
             PREMIUM, extra=(("carrier_type", "Standard"), ("policy_class", "Full Payment"))
         )
         self.assertIn("Net due", " ".join(record.premium_reasons()))
+
+
+class TransactionTypeSpellingTests(unittest.TestCase):
+    """The row's dropdown and QuickBooks' Ship Via list are typed by different
+    people, and a single letter between them left every invoice without a
+    Transaction Type - with nothing on screen to say why."""
+
+    # This company's actual list, typo included.
+    SHIP_VIA = [
+        "Adjustment", "Audit", "Cancellation", "Endorsement", "New Business",
+        "PL New Business", "PL Renewal", "Reinstate", "Renewal Busines", "Rewrite",
+    ]
+
+    def test_one_missing_letter_finds_the_entry(self):
+        from qb_agent.quickbooks import _one_letter_away
+
+        self.assertEqual(_one_letter_away("Renewal Business", self.SHIP_VIA), "Renewal Busines")
+        self.assertEqual(_one_letter_away("renewal business", self.SHIP_VIA), "Renewal Busines")
+
+    def test_it_never_chooses_between_two(self):
+        from qb_agent.quickbooks import _one_letter_away
+
+        # Both are one letter from "Rewrites"... only if both exist. Make two.
+        names = ["Renewal", "Renewals", "Renewel"]
+        self.assertEqual(_one_letter_away("Renewal", ["Renewals", "Renewel"]), "")
+        self.assertEqual(_one_letter_away("Renewal", names[1:2]), "Renewals")
+
+    def test_the_fifteen_character_limit_is_not_a_typo(self):
+        """QuickBooks cuts Ship Via names at 15 characters, so "Renewal
+        Business" can only exist as "Renewal Busines". That is the same name
+        and must match silently, not raise a warning on every invoice."""
+        from qb_agent.quickbooks import WARNING, DesktopQuickBooksGateway
+
+        listing = (
+            "<QBXML><QBXMLMsgsRs><ShipMethodQueryRs statusCode='0'>"
+            + "".join(f"<ShipMethodRet><Name>{n}</Name></ShipMethodRet>" for n in self.SHIP_VIA)
+            + "</ShipMethodQueryRs></QBXMLMsgsRs></QBXML>"
+        )
+
+        class Transport:
+            def request(self, _xml):
+                return listing
+
+        gateway = DesktopQuickBooksGateway.__new__(DesktopQuickBooksGateway)
+        gateway.transport = Transport()
+        gateway.builder = QbxmlBuilder("13.0")
+        gateway._transaction_types = None
+        from qb_agent.config import TransactionTypeConfig
+
+        gateway.transaction_types = TransactionTypeConfig(
+            new_biz="New Business", renewal="Renewal Business"
+        )
+        record = replace(
+            PREMIUM, source_tab="Renewal", extra=(("policy_type", "Renewal Business"),)
+        )
+        notes: list[str] = []
+        self.assertEqual(gateway._resolve_transaction_type(record, notes), "Renewal Busines")
+        self.assertFalse([n for n in notes if n.startswith(WARNING)], notes)
+
+    def test_further_off_is_not_matched(self):
+        from qb_agent.quickbooks import _one_letter_away
+
+        self.assertEqual(_one_letter_away("Renewal Bizness", self.SHIP_VIA), "")
+        self.assertEqual(_one_letter_away("Renewal", self.SHIP_VIA), "")
+        # Short words are too easy to hit by accident.
+        self.assertEqual(_one_letter_away("Audi", self.SHIP_VIA), "")
+
+
+class FeesInvoiceNumberTests(unittest.TestCase):
+    """Fees invoices are numbered "Fee", not with the policy number, so the
+    policy number moves to the Memo - and that is how one is found again."""
+
+    def gateway(self, reply: str = ""):
+        from qb_agent.config import InvoiceKindConfig
+        from qb_agent.quickbooks import DesktopQuickBooksGateway
+
+        class Transport:
+            def __init__(self):
+                self.sent: list[str] = []
+
+            def request(self, xml):
+                self.sent.append(xml)
+                return reply
+
+        gateway = DesktopQuickBooksGateway.__new__(DesktopQuickBooksGateway)
+        gateway.transport = Transport()
+        gateway.builder = QbxmlBuilder("13.0")
+        gateway.premium = InvoiceKindConfig("", "Account Recievable:Premium")
+        gateway.commission = InvoiceKindConfig("", "Account Recievable:Commission")
+        gateway.fees = InvoiceKindConfig("", "Account Recievable:Handling Fees")
+        return gateway
+
+    def test_the_fees_invoice_is_numbered_fee_with_the_policy_in_the_memo(self):
+        spec = premium_spec(ref_number="Fee", memo="Policy #: 101661121")
+        xml = BUILDER.policy_invoice_add(PREMIUM, spec, "JOB-1")
+        add = ET.fromstring(_body(xml)).find(".//InvoiceAdd")
+        self.assertEqual(add.findtext("RefNumber"), "Fee")
+        self.assertEqual(add.findtext("Memo"), "Policy #: 101661121")
+
+    def test_the_other_kinds_keep_the_policy_number(self):
+        xml = BUILDER.policy_invoice_add(PREMIUM, premium_spec(), "JOB-1")
+        add = ET.fromstring(_body(xml)).find(".//InvoiceAdd")
+        self.assertEqual(add.findtext("RefNumber"), PREMIUM.quickbooks_invoice_number)
+
+    def test_the_right_fees_invoice_is_found_among_several_on_one_job(self):
+        def invoice(txn, ref, memo, ar="Account Recievable:Handling Fees"):
+            return (
+                f"<InvoiceRet><TxnID>{txn}</TxnID><EditSequence>1</EditSequence>"
+                f"<RefNumber>{ref}</RefNumber><CustomerRef><ListID>JOB-1</ListID></CustomerRef>"
+                f"<ARAccountRef><FullName>{ar}</FullName></ARAccountRef><Memo>{memo}</Memo>"
+                "<InvoiceLineRet><TxnLineID>L1</TxnLineID></InvoiceLineRet></InvoiceRet>"
+            )
+
+        reply = (
+            "<QBXML><QBXMLMsgsRs><InvoiceQueryRs statusCode='0'>"
+            + invoice("OTHER-YEAR", "Fee", "Policy #: 999")
+            + invoice("COMMISSION", "Fee", "Policy #: 101661121", "Account Recievable:Commission")
+            + invoice("OURS", "Fee", "Policy #: 101661121")
+            + "</InvoiceQueryRs></QBXMLMsgsRs></QBXML>"
+        )
+        gateway = self.gateway(reply)
+        found = gateway.find_policy_invoice(
+            "101661121", "fees", job_list_id="JOB-1", policy_number="101661121"
+        )
+        self.assertEqual(found.txn_id, "OURS")
+        # Asked by job, because every fees invoice has the same number.
+        self.assertIn("<EntityFilter>", gateway.transport.sent[0])
+
+    def test_an_invoice_on_an_older_job_does_not_cause_a_duplicate(self):
+        """The same policy filed under a second Line of Business leaves an
+        invoice on the older job. Returning that one made the caller think no
+        invoice existed here and create another - on every single send."""
+        def invoice(txn, job):
+            return (
+                f"<InvoiceRet><TxnID>{txn}</TxnID><EditSequence>1</EditSequence>"
+                f"<RefNumber>101661121</RefNumber>"
+                f"<CustomerRef><ListID>{job}</ListID></CustomerRef>"
+                "<ARAccountRef><FullName>Account Recievable:Premium</FullName></ARAccountRef>"
+                "<InvoiceLineRet><TxnLineID>L1</TxnLineID></InvoiceLineRet></InvoiceRet>"
+            )
+
+        reply = (
+            "<QBXML><QBXMLMsgsRs><InvoiceQueryRs statusCode='0'>"
+            + invoice("ON-OLD-JOB", "JOB-BOND")
+            + invoice("ON-THIS-JOB", "JOB-SURETY")
+            + "</InvoiceQueryRs></QBXMLMsgsRs></QBXML>"
+        )
+        found = self.gateway(reply).find_policy_invoice(
+            "101661121", "premium", job_list_id="JOB-SURETY"
+        )
+        self.assertEqual(found.txn_id, "ON-THIS-JOB")
+        self.assertEqual(found.customer_list_id, "JOB-SURETY")
+
+
+class LeadSourceMatchingTests(unittest.TestCase):
+    """The sheet's lead source against QuickBooks' Rep list (the template's
+    "Source"). A near miss here is not harmless: an unmatched name is added
+    as a new rep, and a second rep for the same person cannot be merged."""
+
+    # This company's list, full stops and all: (initials, name).
+    REPS = [
+        ("AA", "Ali Ajani"), ("Ahmed", "Ahmed Al Zadjali."), ("AYAZ", "Ayaz Ali."),
+        ("CR", "Customer Referral"), ("KARAM", "Karam Ali"), ("MA", "Munira Akber."),
+        ("NTA", "NATA"), ("NUR", "Nuruddin Jaria."), ("Razia", "Razia Sultana."),
+        ("SD", "Sunil Dosi."), ("Taher", "Taher Ali"),
+    ]
+
+    def gateway(self):
+        from qb_agent.quickbooks import DesktopQuickBooksGateway
+
+        listing = (
+            "<QBXML><QBXMLMsgsRs><SalesRepQueryRs statusCode='0'>"
+            + "".join(
+                f"<SalesRepRet><Initial>{i}</Initial>"
+                f"<SalesRepEntityRef><FullName>{n}</FullName></SalesRepEntityRef></SalesRepRet>"
+                for i, n in self.REPS
+            )
+            + "</SalesRepQueryRs></QBXMLMsgsRs></QBXML>"
+        )
+        sent: list[str] = []
+
+        class Transport:
+            def request(self, xml):
+                sent.append(xml)
+                if "SalesRepQueryRq" in xml:
+                    return listing
+                return "<QBXML><QBXMLMsgsRs><X statusCode='0'/></QBXMLMsgsRs></QBXML>"
+
+        gateway = DesktopQuickBooksGateway.__new__(DesktopQuickBooksGateway)
+        gateway.transport = Transport()
+        gateway.builder = QbxmlBuilder("13.0")
+        gateway._reps = None
+        gateway._rep_names = {}
+        gateway.source_aliases = {"tahir": "Taher"}
+        gateway._send = lambda xml: sent.append(xml)
+        return gateway, sent
+
+    def resolve(self, value):
+        gateway, sent = self.gateway()
+        got = gateway._resolve_sales_rep(value, [])
+        added = [x for x in sent if "SalesRepAddRq" in x]
+        return got, added
+
+    def test_existing_reps_are_found_however_the_sheet_spells_them(self):
+        for value, initials in [
+            ("NATA", "NTA"), ("Ahmed", "Ahmed"), ("ahmed", "Ahmed"), ("AHMED", "Ahmed"),
+            ("Nur", "NUR"), ("Ali Ajani", "AA"), ("Customer Referral", "CR"),
+            # The full stop on QuickBooks' side.
+            ("Sunil Dosi", "SD"), ("Ayaz Ali", "AYAZ"), ("AYAZ ALI", "AYAZ"),
+            # A first name belonging to exactly one rep.
+            ("Munira", "MA"),
+        ]:
+            with self.subTest(value):
+                got, added = self.resolve(value)
+                self.assertEqual(got, initials)
+                self.assertEqual(added, [], f"{value!r} made a duplicate rep")
+
+    def test_a_cell_naming_several_takes_the_first_already_a_rep(self):
+        for value, initials in [
+            ("Cross Sell, Ahmed", "Ahmed"),
+            ("Dilshad / Razia", "Razia"),
+            ("Razia winback, Nur", "NUR"),
+            ("Tahir, Razia winback", "Taher"),
+        ]:
+            with self.subTest(value):
+                got, added = self.resolve(value)
+                self.assertEqual(got, initials)
+                self.assertEqual(added, [])
+
+    def test_when_none_is_a_rep_the_first_is_added(self):
+        got, added = self.resolve("Existing insured - new project, Cross Sell")
+        self.assertEqual(got, "EXIST")
+        self.assertEqual(len(added), 1)
+
+    def test_tahir_is_taher(self):
+        for value in ("Tahir", "tahir"):
+            with self.subTest(value):
+                got, added = self.resolve(value)
+                self.assertEqual(got, "Taher")
+                self.assertEqual(added, [])
+
+    def test_a_blank_lead_source_leaves_source_empty(self):
+        got, added = self.resolve("")
+        self.assertEqual(got, "")
+        self.assertEqual(added, [])
+
+    def test_a_name_not_on_the_list_is_added(self):
+        got, added = self.resolve("Nizar")
+        self.assertEqual(got, "NIZAR")
+        self.assertEqual(len(added), 1)
+
+    def test_a_first_name_two_reps_share_is_not_guessed(self):
+        # "Ali" is the first name of Ali Ajani only - but add a second Ali and
+        # the choice is a guess, so it must not be made.
+        self.REPS = self.REPS + [("AL2", "Ali Raza")]
+        got, added = self.resolve("Ali")
+        self.assertNotIn(got, {"AA", "AL2"})
+        self.assertEqual(len(added), 1)
 
 
 def _body(xml: str) -> str:

@@ -12,7 +12,7 @@ from time import sleep
 
 from .config import AppConfig
 from .models import Action, Operation, WorkRecord
-from .quickbooks import QuickBooksError, QuickBooksGateway
+from .quickbooks import WARNING, QuickBooksError, QuickBooksGateway
 from .storage import Store
 
 FINISHED = {"completed", "already_exists"}
@@ -387,7 +387,12 @@ class Processor:
         and updated in its place.
         """
         spec = _INVOICE_DETAIL[kind]
-        existing = gateway.find_policy_invoice(record.quickbooks_invoice_number, kind)
+        existing = gateway.find_policy_invoice(
+            record.quickbooks_invoice_number,
+            kind,
+            job_list_id=target.list_id,
+            policy_number=record.invoice_number,
+        )
         if existing is not None and existing.customer_list_id == target.list_id:
             # Sending again is how an edited row is corrected, so the existing
             # invoice is brought up to date rather than left as it was.
@@ -414,10 +419,17 @@ class Processor:
             if note:
                 steps.append(note)
         steps.extend(notes)
+        # A warning goes in the message itself, not only the detail log: the
+        # invoice was made, but something on it is not what the row asked for,
+        # and a bare "invoice created" would say everything was fine.
+        warnings = [note.removeprefix(WARNING) for note in notes if note.startswith(WARNING)]
+        message = f"{spec['label']} invoice {verb}."
+        if warnings:
+            message = f"{message} {' '.join(warnings)}"
         return self._save(
             record,
             "completed",
-            f"{spec['label']} invoice {verb}.",
+            message,
             steps=steps,
             invoice_txn_id=invoice.txn_id,
             invoice_ref_number=invoice.ref_number,

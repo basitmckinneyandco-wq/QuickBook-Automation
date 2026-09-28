@@ -17,7 +17,6 @@ from xml.etree import ElementTree as ET
 from .models import MAX_CUSTOMER_NAME, InvoiceSpec, WorkRecord
 
 # QuickBooks list limits for the values these invoices reference.
-MAX_TERMS_NAME = 31
 MAX_REP_INITIAL = 5
 MAX_ITEM_NAME = 31
 
@@ -194,7 +193,7 @@ class QbxmlBuilder:
     ) -> None:
         """Everything above the line items, shared by the add and the mod."""
         # Schema order: CustomerRef, ClassRef, ARAccountRef, TemplateRef,
-        # TxnDate, RefNumber, TermsRef, SalesRepRef, Memo, then the lines.
+        # TxnDate, RefNumber, SalesRepRef, ShipMethodRef, Memo, then the lines.
         customer_ref = ET.SubElement(addition, "CustomerRef")
         ET.SubElement(customer_ref, "ListID").text = job_list_id
         if spec.class_name:
@@ -208,17 +207,28 @@ class QbxmlBuilder:
             ET.SubElement(template_ref, "FullName").text = spec.template
         if record.invoice_date is not None:
             ET.SubElement(addition, "TxnDate").text = record.invoice_date.isoformat()
-        if record.invoice_number:
+        if spec.ref_number:
+            ET.SubElement(addition, "RefNumber").text = spec.ref_number
+        elif record.invoice_number:
             ET.SubElement(addition, "RefNumber").text = record.quickbooks_invoice_number
         # Both templates rename two built-in fields, so that is where these
-        # land: Terms is labelled "Transaction Type", Rep is "Source".
-        if spec.terms:
-            terms_ref = ET.SubElement(addition, "TermsRef")
-            ET.SubElement(terms_ref, "FullName").text = spec.terms
+        # land: Rep is labelled "Source", and Ship Via is "Transaction Type".
+        #
+        # Ship Via, not Terms. The label on the form says nothing about which
+        # field is underneath it, and Terms is the one that looks right - but
+        # the list behind this company's Transaction Type holds Endorsement,
+        # Cancellation and Rewrite, which are not payment terms. Written to
+        # Terms the value is stored and never shown, because the template does
+        # not display Terms at all.
         if spec.sales_rep:
             rep_ref = ET.SubElement(addition, "SalesRepRef")
             ET.SubElement(rep_ref, "FullName").text = spec.sales_rep
-        if record.invoice_number_was_shortened:
+        if spec.transaction_type:
+            ship_ref = ET.SubElement(addition, "ShipMethodRef")
+            ET.SubElement(ship_ref, "FullName").text = spec.transaction_type
+        if spec.memo:
+            ET.SubElement(addition, "Memo").text = spec.memo
+        elif record.invoice_number_was_shortened:
             ET.SubElement(addition, "Memo").text = f"Policy #: {record.invoice_number}"
 
     def _invoice_line(self, line: ET.Element, spec: InvoiceSpec) -> None:
@@ -265,14 +275,9 @@ class QbxmlBuilder:
     # The two renamed template fields are list references, so their values have
     # to exist in QuickBooks before an invoice can point at them.
 
-    def terms_list(self, request_id: str = "terms-list") -> str:
-        root, _ = self._envelope("StandardTermsQueryRq", request_id)
-        return self._serialize(root)
-
-    def terms_add(self, name: str, request_id: str = "terms-add") -> str:
-        root, request = self._envelope("StandardTermsAddRq", request_id)
-        addition = ET.SubElement(request, "StandardTermsAdd")
-        ET.SubElement(addition, "Name").text = name[:MAX_TERMS_NAME]
+    def ship_method_list(self, request_id: str = "ship-method-list") -> str:
+        """The Ship Via list, which the invoice templates label Transaction Type."""
+        root, _ = self._envelope("ShipMethodQueryRq", request_id)
         return self._serialize(root)
 
     def sales_rep_list(self, request_id: str = "rep-list") -> str:
@@ -302,6 +307,20 @@ class QbxmlBuilder:
         root, request = self._envelope("InvoiceQueryRq", request_id)
         ET.SubElement(request, "RefNumber").text = ref_number
         # The lines come back so an existing invoice can be modified in place.
+        ET.SubElement(request, "IncludeLineItems").text = "true"
+        return self._serialize(root)
+
+    def invoice_query_for_job(self, job_list_id: str, request_id: str = "invoice-job") -> str:
+        """Every invoice on one customer:job.
+
+        Used where the number cannot identify the invoice - fees invoices are
+        all numbered "Fee" - so the job narrows it and the Memo decides.
+        QuickBooks does not allow a RefNumber and an EntityFilter in the same
+        query, so the number is checked afterwards rather than asked for.
+        """
+        root, request = self._envelope("InvoiceQueryRq", request_id)
+        entity = ET.SubElement(request, "EntityFilter")
+        ET.SubElement(entity, "ListID").text = job_list_id
         ET.SubElement(request, "IncludeLineItems").text = "true"
         return self._serialize(root)
 
@@ -390,6 +409,7 @@ def parse_invoice_matches(xml: str) -> list[dict[str, str]]:
             "customer_list_id": ret.findtext("CustomerRef/ListID", ""),
             "ar_account": ret.findtext("ARAccountRef/FullName", ""),
             "line_id": ret.findtext("InvoiceLineRet/TxnLineID", ""),
+            "memo": ret.findtext("Memo", ""),
         }
         for ret in ET.fromstring(xml).iter("InvoiceRet")
     ]
