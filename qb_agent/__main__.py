@@ -45,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.add_parser("whoami", help="Print the company file QuickBooks has open right now.")
     subparsers.add_parser("check", help="Print the current settings and safety state.")
     subparsers.add_parser("doctor", help="Diagnose why QuickBooks cannot be reached.")
+    subparsers.add_parser("sheet", help="Diagnose why the Google Sheet is not updating.")
 
     args = parser.parse_args(argv)
     command = args.command or "serve"
@@ -65,6 +66,9 @@ def main(argv: list[str] | None = None) -> int:
     if command == "check":
         print(json.dumps(runtime.health(), indent=2, default=str))
         return 0
+
+    if command == "sheet":
+        return _sheet(config)
 
     serve(
         runtime,
@@ -89,6 +93,86 @@ def _whoami() -> int:
     print(f"  {path}\n")
     print("To work in it, open the dashboard's Status page, pick it under")
     print("Company file and press Switch to this company. Nothing to edit by hand.")
+    return 0
+
+
+def _sheet(config) -> int:
+    """Report why the four status columns are not reaching the sheet.
+
+    "It works on one computer and not the other" has a handful of causes, and
+    every one of them is invisible from the dashboard, which only says the
+    write failed. This names the one that applies.
+
+    Read-only throughout: it signs in, lists the tabs and counts the rows.
+    Nothing in the sheet is changed by running it.
+    """
+    from .gsheets import Sheets, SheetsError
+
+    settings = config.google_sheet
+
+    def line(label: str, value: object) -> None:
+        print(f"  {label:<30} {value}")
+
+    print("\n  Google Sheet connection report")
+    print("  " + "-" * 56)
+
+    if not settings.enabled:
+        print("\n  The sheet is switched off in the settings: either the")
+        print("  spreadsheet id or the key file name is blank in config.json.\n")
+        return 1
+
+    try:
+        import google.oauth2.service_account  # noqa: F401
+        line("Google libraries installed", "yes")
+    except ImportError:
+        line("Google libraries installed", "NO")
+        print("\n  >>> This is the whole problem. In this folder run:")
+        print("          pip install -r requirements.txt\n")
+        return 1
+
+    key = Path(settings.key_file)
+    line("Key file expected at", key)
+    if not key.is_file():
+        line("Key file found", "NO")
+        print("\n  >>> Put the service-account.json file in that exact folder.")
+        near = sorted(p.name for p in key.parent.glob("service-account*"))
+        if near:
+            # Windows hides known extensions, so service-account.json.txt looks
+            # right in Explorer and is the usual reason for this.
+            print(f"      Something close is there already: {', '.join(near)}")
+            print("      The name must end in .json and nothing after it.")
+        print()
+        return 1
+    line("Key file found", "yes")
+
+    try:
+        sheets = Sheets(settings.key_file, settings.spreadsheet_id)
+        line("Signed in as", sheets.account_email)
+        titles = sheets.tab_titles()
+    except SheetsError as exc:
+        line("Signed in as", "FAILED")
+        print(f"\n  {exc}\n")
+        return 1
+
+    line("Tabs in the spreadsheet", len(titles))
+    missing = []
+    for label, title in settings.tab_titles.items():
+        if title in titles:
+            rows = len(sheets.read(title))
+            line(f"  {label}", f"{title} - {rows} rows, readable")
+        else:
+            missing.append(title)
+            line(f"  {label}", f"{title} - NOT IN THIS SPREADSHEET")
+
+    if missing:
+        print("\n  >>> The tab names in config.json do not match the sheet.")
+        print(f"      The spreadsheet has: {', '.join(titles)}\n")
+        return 1
+
+    line("Writing statuses back", "on" if settings.write_status else "OFF in config.json")
+    print("\n  The sheet can be read and the account is signed in. If statuses")
+    print("  still do not appear, the account above needs Editor access, not")
+    print("  Viewer - check the Share list on the sheet itself.\n")
     return 0
 
 
