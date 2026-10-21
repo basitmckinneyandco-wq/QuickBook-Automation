@@ -366,6 +366,27 @@
             Each company keeps its own history file, so what was created in one is
             never mistaken for work already done in another.
           </p>
+
+          <details class="company-manual">
+            <summary>Not in the list? Enter the file path</summary>
+            <p class="muted">
+              A company kept on another computer is not found by the scan, which
+              only looks at this one. Open it in QuickBooks, then paste the full
+              path to its <code>.qbw</code> file — a shared folder
+              (<code>\\computer\folder\My Company.qbw</code>) or a mapped drive
+              (<code>Z:\My Company.qbw</code>) both work.
+            </p>
+            <div class="company-pick">
+              <input id="companyPath" type="text" spellcheck="false"
+                     autocomplete="off" aria-label="Company file path"
+                     placeholder="\\computer\folder\My Company.qbw">
+              <button class="btn primary" id="useCompanyPath" type="button">Connect to this file</button>
+            </div>
+            <p class="muted">
+              QuickBooks is asked to open it before anything is saved, so a path
+              with a typo in it is refused rather than remembered.
+            </p>
+          </details>
         </section>
 
         <section class="panel" id="unlockPanel" hidden>

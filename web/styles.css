@@ -743,6 +743,36 @@ select {
 .company-pick { display: flex; gap: 10px; align-items: center; margin: 4px 0 16px; flex-wrap: wrap; }
 .company-pick select { flex: 1 1 320px; min-width: 0; transition: border-color .25s, box-shadow .25s; }
 
+/* Typing the path by hand: for a company this machine cannot scan, because it
+   lives on another one. Folded away, since the list answers the usual case. */
+.company-manual { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+.company-manual summary {
+  cursor: pointer; font-size: 13px; font-weight: 600; color: var(--accent);
+  list-style: none; display: inline-flex; align-items: center; gap: 7px;
+}
+.company-manual summary::-webkit-details-marker { display: none; }
+.company-manual summary::before {
+  content: ""; width: 6px; height: 6px; flex: none;
+  border-right: 1.6px solid currentColor; border-bottom: 1.6px solid currentColor;
+  transform: rotate(-45deg); transition: transform .2s ease;
+}
+.company-manual[open] summary::before { transform: rotate(45deg); }
+.company-manual .company-pick { margin-bottom: 6px; }
+.company-manual input {
+  flex: 1 1 320px; min-width: 0; padding: 9px 11px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+  font-size: 13px; font-family: var(--mono, ui-monospace, monospace);
+  transition: border-color .25s, box-shadow .25s;
+}
+.company-manual input:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .company-manual summary::before { transition: none; }
+}
+
 /* ═══ the sheet-link lock ════════════════════════════════════════════════
    Every row on the dashboard arrives through this one link, so it is kept
    shut until somebody means to change it. */

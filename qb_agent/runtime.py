@@ -21,6 +21,7 @@ from .quickbooks import (
     DryRunQuickBooksGateway,
     RequestProcessorTransport,
     company_files,
+    same_company_file,
     sdk_registered,
     ui_blockers,
 )
@@ -1476,9 +1477,15 @@ class Runtime:
                     company_file = transport.current_company_file()
                 company_file = str(Path(company_file).resolve())
             else:
-                company_file = str(Path(company_file).resolve())
+                company_file = str(Path(company_file.strip()).resolve())
                 if not Path(company_file).is_file():
-                    raise ValueError(f"There is no company file at {company_file}.")
+                    # A typed path fails here as often for being unreachable as
+                    # for being wrong, and the two need different fixes.
+                    raise ValueError(
+                        f"No company file could be read at {company_file}. Check the "
+                        f"spelling, and - if it is on another computer - that the "
+                        f"folder is shared and this computer can reach it."
+                    )
                 self._prove_company(company_file)
 
             display = Path(company_file).stem
@@ -1552,13 +1559,14 @@ def _key(path: str) -> str:
 
 
 def _same_file(left: str, right: str) -> bool:
-    """Two paths pointing at one file, whatever the spelling or capitals."""
-    if not left or not right:
-        return False
-    try:
-        return Path(left).resolve() == Path(right).resolve()
-    except OSError:
-        return left.strip().casefold() == right.strip().casefold()
+    """Two paths pointing at one file, whatever the spelling or capitals.
+
+    The same test the session guard uses, so picking the company a second
+    machine reaches by a mapped drive is understood as the company already in
+    use - and keeps the history this app has recorded for it - rather than
+    being treated as a new company and starting again from nothing.
+    """
+    return same_company_file(left, right)
 
 
 def _join(values: set[str], limit: int = 8) -> str:

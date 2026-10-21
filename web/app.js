@@ -3039,14 +3039,20 @@ async function useCompany() {
     tone: "ask",
   });
   if (!go) return;
+  await switchCompany(chosen === OPEN_COMPANY ? "" : chosen, button, current);
+}
 
+/* The same switch, however the file was named: picked from the scan above, or
+   typed in by hand below. Only the asking differs, so only the asking is
+   written twice. */
+async function switchCompany(filePath, button, current) {
   const label = button.textContent;
   setBusy(button, "Asking QuickBooks…");
   try {
     const payload = await api("/api/company", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file_path: chosen === OPEN_COMPANY ? "" : chosen }),
+      body: JSON.stringify({ file_path: filePath }),
     }, 90000);
     state.health = payload.health || state.health;
     renderHealth();
@@ -3054,6 +3060,7 @@ async function useCompany() {
     await loadCompanies();
     toast(`Now working in ${payload.company.company}.`);
     await refresh();
+    return true;
   } catch (error) {
     await ask({
       title: "Could not switch company",
@@ -3062,11 +3069,57 @@ async function useCompany() {
       ok: "Close",
       tone: "danger",
     });
+    return false;
   } finally {
     button.disabled = false;
     button.classList.remove("is-busy");
     button.textContent = label;
   }
+}
+
+/* A company file this machine cannot find for itself - one kept on another
+   computer and reached over the network. The scan above only reads local
+   folders, so without this there is no way to name it from the dashboard. */
+async function useCompanyPath() {
+  const button = $("useCompanyPath");
+  const box = $("companyPath");
+  // Windows' own "Copy as path" wraps the path in quotes, and pasting those
+  // in would make it a file that does not exist.
+  const typed = box.value.trim().replace(/^"(.*)"$/s, "$1").trim();
+  const current = (state.health && state.health.company) || {};
+  if (!typed) {
+    toast("Paste the path to the company file first.");
+    box.focus();
+    return;
+  }
+  if (!/\.qbw$/i.test(typed)) {
+    toast("That is not a company file - the name has to end in .qbw");
+    box.focus();
+    return;
+  }
+  const name = typed.replace(/^.*[\\/]/, "").replace(/\.qbw$/i, "");
+  if (current.file_path && typed.toLowerCase() === current.file_path.toLowerCase()) {
+    toast(`Already working in ${name}.`);
+    return;
+  }
+
+  const lines = [`Switching to:  ${name}`, `File:  ${typed}`];
+  if (current.display_name) lines.push(`Leaving:  ${current.display_name}`);
+
+  const go = await ask({
+    title: `Switch the app to ${name}?`,
+    sub: "QuickBooks has to have this company open already, or it cannot be "
+       + "reached and nothing is saved.",
+    detail: lines.join("\n"),
+    note: "Every customer, job and invoice created from now on goes into that "
+        + "company, and it keeps its own history file.",
+    ok: "Connect",
+    cancel: "Not now",
+    tone: "ask",
+  });
+  if (!go) return;
+
+  if (await switchCompany(typed, button, current)) box.value = "";
 }
 
 /* ═══ the pre-flight check ════════════════════════════════════════════════
@@ -3773,6 +3826,10 @@ function wire() {
   $("statusRefresh").addEventListener("click", refresh);
   $("preflightRun").addEventListener("click", runPreflight);
   $("useCompany").addEventListener("click", useCompany);
+  $("useCompanyPath").addEventListener("click", useCompanyPath);
+  $("companyPath").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") useCompanyPath();
+  });
   $("companyRescan").addEventListener("click", () => loadCompanies({ announce: true }));
   $("sourceSave").addEventListener("click", saveDataSource);
   $("bulkEditButton").addEventListener("click", openBulkEdit);
