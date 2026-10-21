@@ -127,10 +127,13 @@ class RequestProcessorTransport(AbstractContextManager["RequestProcessorTranspor
             self._ticket = self._begin_session()
             if self.company_file:
                 actual = self.current_company_file()
-                if _normal_path(actual) != _normal_path(self.company_file):
+                if not same_company_file(actual, self.company_file):
                     raise QuickBooksError(
                         f"Wrong QuickBooks company is open. Expected {self.company_file!r}; "
-                        f"QuickBooks has {actual!r}."
+                        f"QuickBooks has {actual!r}. If these are the same file reached "
+                        f"two ways - a mapped drive on one machine and \\\\server\\share "
+                        f"on another - open the Status page and pick the company again, "
+                        f"which saves the name this machine uses."
                     )
             return self
         except Exception as exc:
@@ -1076,4 +1079,51 @@ def _fake_id(kind: str, value: str) -> str:
 
 
 def _normal_path(value: str) -> str:
-    return os.path.normcase(os.path.abspath(value.strip()))
+    """One spelling for a path, so two names for one file compare equal.
+
+    A mapped drive is the same folder as the share behind it under another
+    name: Z:\\Intuit\\... on one machine is \\\\alizain\\d\\Intuit\\... on the
+    one sharing it. The settings file is copied between machines, so unless
+    the two are brought together the app sees a different company and refuses
+    to work with the one that is open.
+    """
+    return os.path.normcase(os.path.abspath(_share_path(value.strip())))
+
+
+def _share_path(path: str) -> str:
+    """A mapped drive rewritten as the share it stands for, where it is one.
+
+    Left alone for a local drive or a path that is already a share, and
+    whenever Windows will not say - a guess here would be worse than the
+    plain path, which still matches itself.
+    """
+    drive = os.path.splitdrive(path)[0]
+    if len(drive) != 2 or not drive.endswith(":"):
+        return path          # already \\server\share, or no drive at all
+    try:
+        import win32wnet  # type: ignore
+
+        return win32wnet.WNetGetUniversalName(path, 1)
+    except Exception:
+        return path          # a local drive, or pywin32 is not installed
+
+
+def same_company_file(one: str, two: str) -> bool:
+    """Whether two paths name the same QuickBooks company file.
+
+    Compared as text first, with mapped drives resolved. Failing that, the
+    two are put to Windows itself: a company reached as D:\\... on the machine
+    sharing it and as \\\\server\\d\\... from another is one file, and only the
+    file system can say so.
+    """
+    if not one.strip() or not two.strip():
+        return False
+    if _normal_path(one) == _normal_path(two):
+        return True
+    try:
+        return os.path.samefile(one, two)
+    except OSError:
+        # One of them cannot be reached from here - a share that is offline,
+        # or a drive letter this machine does not have. Not the same file as
+        # far as anyone can tell, which is the safe answer.
+        return False
