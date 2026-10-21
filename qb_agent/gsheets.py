@@ -63,8 +63,13 @@ class Sheets:
             from google.auth.transport.requests import Request
             from google.oauth2 import service_account
         except ImportError as exc:
+            # Name the package. "The Google libraries are missing" sent people
+            # to a command they had already run successfully, because what was
+            # actually absent was something google-auth leaves to be installed
+            # alongside it.
             raise SheetsError(
-                "The Google libraries are missing. Run: pip install -r requirements.txt"
+                f"A library the sheet needs is missing ({exc.name or exc}). "
+                f"In the app's folder run: python -m pip install -r requirements.txt"
             ) from exc
 
         if not Path(self.key_file).is_file():

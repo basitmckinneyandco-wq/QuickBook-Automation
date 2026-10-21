@@ -1,4 +1,4 @@
-# The two third-party packages this app needs. Everything else is in Python
+# The third-party packages this app needs. Everything else is in Python
 # itself.
 
 # What lets Python talk to QuickBooks Desktop over COM. Windows-only, so the
@@ -9,3 +9,10 @@ pywin32>=306
 # write each policy's status back into it. Only needed when google_sheet is set
 # in config.json; the published-link route uses nothing but Python itself.
 google-auth>=2.30
+
+# google-auth signs the key itself, but hands the signed request to this to
+# send - and does not install it, because it can use other senders instead.
+# Leaving it out worked on machines that happened to have it for some other
+# reason, and failed on clean ones with an error naming neither this file nor
+# the package.
+requests>=2.31
