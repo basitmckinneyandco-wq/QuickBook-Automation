@@ -121,6 +121,11 @@ def _sheet(config) -> int:
         print("  spreadsheet id or the key file name is blank in config.json.\n")
         return 1
 
+    # Printed whether or not anything is wrong: the key is signed with this
+    # clock, so a report that leaves it out cannot be read by anyone later.
+    import datetime
+    line("Clock on this computer", datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %z"))
+
     try:
         import google.oauth2.service_account  # noqa: F401
         line("Google libraries installed", "yes")

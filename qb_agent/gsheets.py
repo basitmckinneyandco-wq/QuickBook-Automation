@@ -84,6 +84,16 @@ class Sheets:
             try:
                 self._credentials.refresh(Request())
             except Exception as exc:
+                # The key is signed with the time on this computer. A clock a
+                # few minutes out is refused as "invalid_grant", which says
+                # nothing about clocks and sends people hunting the key file.
+                if "invalid_grant" in str(exc):
+                    raise SheetsError(
+                        "Google refused the key because this computer's clock is "
+                        "wrong. Right-click the clock, choose Adjust date and time, "
+                        "and turn on 'Set time automatically' - then try again. "
+                        f"({exc})"
+                    ) from exc
                 raise SheetsError(f"Google refused the key: {exc}") from exc
         return str(self._credentials.token)
 
