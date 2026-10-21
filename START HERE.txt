@@ -27,7 +27,11 @@ Change the folder path if you unzipped somewhere else:
 
     cd "C:\QuickBooks Automation"
 
-    pip install -r requirements.txt
+    python -m pip install -r requirements.txt
+
+Write it as "python -m pip", not plain "pip". A computer with
+more than one Python installs into the wrong one otherwise -
+it says it succeeded, and nothing changes.
 
 You do NOT need to download anything from Intuit. QuickBooks
 already installs the part that lets this app talk to it.
@@ -158,5 +162,22 @@ Two pages answer nearly everything:
   Status   - can I send? What is connected, what is missing.
   History  - what happened when I did? Every action, and the
              exact error, which you can copy and send on.
+
+And two commands, for the two halves of the setup. Run them in
+this folder, in PowerShell:
+
+  python -m qb_agent --config config.json doctor
+      Why QuickBooks cannot be reached.
+
+  python -m qb_agent --config config.json sheet
+      Why the Google Sheet is not updating. Neither changes
+      anything - they only look and report.
+
+THE POLICIES SHOWING DOES NOT MEAN THE SHEET IS CONNECTED.
+The policy list arrives through the published link, which needs
+no sign-in at all. The four QB status columns are the part that
+needs the key file. So a dashboard full of policies that never
+saves a status is the normal face of a sheet problem - run the
+"sheet" command above rather than believing the screen.
 
 More detail is in SETUP.md in this folder.
