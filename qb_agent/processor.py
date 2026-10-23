@@ -58,19 +58,81 @@ _LOB_WORDS = {
 }
 
 # Exact Line of Business equivalents that a word-by-word abbreviation rule
-# cannot safely infer. Every value is the single canonical meaning for that
-# group, making this deliberately symmetric: either spelling can already be
-# in QuickBooks and the other can arrive from the dashboard.
+# cannot safely infer, because the two spellings are not the same number of
+# words: "Prpty" and "Commercial Property" mean one thing and look like two.
+# Every value is the single canonical meaning for that group, making this
+# deliberately symmetric: either spelling can already be in QuickBooks and
+# the other can arrive from the dashboard.
+#
+# Read out of the company file itself rather than imagined - 6,963 jobs, 439
+# distinct spellings - so what is here is what people have actually typed,
+# misspellings and all. A spelling that is genuinely a different cover is
+# deliberately absent: Homeowners (Condo), Umbrella - Personal, the numbered
+# Property 1 / Flood 2 and so on stay the separate jobs they are.
 _LOB_EQUIVALENTS = {
     # Business Owners Policy / package.
     "bop": "package",
     "business owners policy": "package",
     "business owner policy": "package",
     "package": "package",
+    "pkg": "package",
+    "pakage": "package",
+    # Property. Plain Property and Commercial Property are one cover here, so
+    # the one-word spellings carry across to the two-word ones.
+    "property": "commercial property",
+    "properties": "commercial property",
+    "prpty": "commercial property",
+    "prop": "commercial property",
+    "ppty": "commercial property",
+    "proprty": "commercial property",
+    "commercial property": "commercial property",
+    "commercial prpty": "commercial property",
+    "comm property": "commercial property",
+    "comm prpty": "commercial property",
+    "com prpty": "commercial property",
+    "comp prpty": "commercial property",
+    "comm prprt": "commercial property",
+    "commerical property": "commercial property",
+    # Liquor liability, including LL and the Liqour misspelling.
+    "ll": "liquor liability",
+    "liq": "liquor liability",
+    "liquor": "liquor liability",
+    "liquor liability": "liquor liability",
+    "liquor liab": "liquor liability",
+    "liqour liability": "liquor liability",
+    "liqour liab": "liquor liability",
+    "liqour liabilty": "liquor liability",
+    # Commercial and personal motor are different covers and must not be run
+    # together. Plain "Auto" is the personal one.
+    "commercial auto": "commercial auto",
+    "comm auto": "commercial auto",
+    "com auto": "commercial auto",
+    "auto commercial": "commercial auto",
+    "auto comm": "commercial auto",
+    "auto cl": "commercial auto",
+    "auto": "personal auto",
+    "autop": "personal auto",
+    "personal auto": "personal auto",
+    "auto personal": "personal auto",
+    "auto p": "personal auto",
+    "auto prsnl": "personal auto",
+    # Homeowners. The bracketed forms - (Condo), (Renters) - are left out on
+    # purpose: they are separate covers, not spellings of this one.
+    "home": "homeowners",
+    "homeowner": "homeowners",
+    "homeowners": "homeowners",
+    "homeoners": "homeowners",
+    "home owner": "homeowners",
+    "home owners": "homeowners",
     # Umbrella cover is often recorded as excess liability.
     "umbrella": "umbrella",
+    "umberlla": "umbrella",
+    "umb": "umbrella",
     "umbrella comm": "umbrella",
+    "umb comm": "umbrella",
+    "umberlla comm": "umbrella",
     "commercial umbrella": "umbrella",
+    "commercial umb": "umbrella",
     "umbrella commercial": "umbrella",
     "excess liability": "umbrella",
     "excess liability umbrella": "umbrella",
@@ -78,16 +140,34 @@ _LOB_EQUIVALENTS = {
     # the sheet so a typo does not create a second QuickBooks job.
     "firearms": "active assailant",
     "fire arms": "active assailant",
+    "fire arm": "active assailant",
     "firms arms": "active assailant",
+    "firm arm liability": "active assailant",
+    "fire arms liability": "active assailant",
+    "fire arms liab": "active assailant",
+    "firearms liability": "active assailant",
     "active assailant": "active assailant",
+    "assailant": "active assailant",
     "active assualat": "active assailant",
     "active assault": "active assailant",
     "shooting": "active assailant",
+    "shooting liability": "active assailant",
+    # Equipment breakdown, which is abbreviated several ways. Plain
+    # "Equipment" is left alone - it is not clear it means this one.
+    "eb": "equipment breakdown",
+    "eq": "equipment breakdown",
+    "eqb": "equipment breakdown",
+    "eq breakdown": "equipment breakdown",
+    "equipment breakdown": "equipment breakdown",
+    "equipement breakdown": "equipment breakdown",
     # Employment practices. "Accidental medical coverage" is included here
     # because it is the agency's specified QuickBooks equivalent.
     "epli": "employment practices liability",
     "employment practices liability": "employment practices liability",
     "employment practices liability insurance": "employment practices liability",
+    "empl practices liab": "employment practices liability",
+    "empl practice liability": "employment practices liability",
+    "empl practices liability": "employment practices liability",
     "accidental medical coverage": "employment practices liability",
     "accedental medical coverage": "employment practices liability",
     # Workers compensation.
@@ -96,16 +176,34 @@ _LOB_EQUIVALENTS = {
     "worker compensation": "workers compensation",
     "workers comp": "workers compensation",
     "worker comp": "workers compensation",
+    "wokrer comp": "workers compensation",
     "work comp": "workers compensation",
+    "worker com": "workers compensation",
+    "worker comps": "workers compensation",
     "worker s compensation": "workers compensation",
-    # Bonds.
+    # Bonds. Named bonds - Performance, Lottery, Contractor - are their own
+    # jobs and are not folded in here.
     "surety bond": "bond",
+    "surey bond": "bond",
     "surety": "bond",
     "bond": "bond",
+    # Builder's risk, whose apostrophe makes a word of its own once stripped.
+    "builder s risk": "builders risk",
+    "builders risk": "builders risk",
+    "builder risk": "builders risk",
+    "builers risk": "builders risk",
+    # Pollution.
+    "pollution": "pollution liability",
+    "pollution liability": "pollution liability",
+    "pollution liab": "pollution liability",
     # Widely used insurance abbreviations that are the same coverage name.
     "gl": "general liability",
     "cgl": "general liability",
+    "genl": "general liability",
     "general liability": "general liability",
+    "genl liability": "general liability",
+    "general liab": "general liability",
+    "genl liab": "general liability",
     "commercial general liability": "general liability",
     "d o": "directors officers",
     "directors officers": "directors officers",
@@ -114,6 +212,7 @@ _LOB_EQUIVALENTS = {
     "errors omissions": "professional liability",
     "errors and omissions": "professional liability",
     "professional liability": "professional liability",
+    "professional liab": "professional liability",
     "cyber": "cyber liability",
     "cyber liability": "cyber liability",
 }
