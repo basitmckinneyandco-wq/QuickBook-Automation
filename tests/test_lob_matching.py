@@ -28,9 +28,17 @@ class LineOfBusinessTests(unittest.TestCase):
     def test_property_however_it_is_shortened(self):
         """The spelling that started this: QuickBooks holds Prpty, the sheet
         sends Commercial Property, and a second job appeared every time."""
-        for spelling in ("Prpty", "Property", "Prop", "PPTY", "Proprty",
-                         "Comm Prpty", "Comp Prpty", "COMMERICAL PROPERTY"):
+        for spelling in ("Prpty", "Propty", "Property", "Prop", "PPTY", "Proprty",
+                         "Proprety", "Comm Prpty", "Comm Propty", "Comp Prpty",
+                         "COMMERICAL PROPERTY"):
             self.assertSame("Commercial Property", spelling)
+
+    def test_vacant_property_keeps_its_own_shortenings(self):
+        """Vacant Property is a separate cover, and its own misspellings have
+        to reach it rather than falling through to Commercial Property."""
+        self.assertSame("Vacant Property", "Vacant prpty")
+        self.assertSame("Vacant Property", "Vacant propty")
+        self.assertDifferent("Commercial Property", "Vacant Property")
 
     def test_a_one_word_name_still_matches_a_two_word_one(self):
         """The rule underneath compares word by word, so Prpty against
