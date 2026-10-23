@@ -3390,24 +3390,18 @@ function chooseQuickBooksCustomers(rows) {
 
     const options = div("customer-options");
     const candidates = row.candidates || [];
-    if (candidates.length) {
-      // Say what the list is before listing it: these are guesses, and the
-      // first one is not automatically the right one.
-      options.append(div(
-        "customer-legend",
-        candidates.length === 1
-          ? "One existing customer looks similar"
-          : `${candidates.length} existing customers look similar`
-      ));
-    } else {
-      const empty = div("customer-empty");
-      empty.append(
-        div("customer-empty-mark", "!"),
-        div("customer-empty-text", row.reason
-          || "Nothing in QuickBooks resembles this name, so creating it is the only option here.")
-      );
-      options.append(empty);
-    }
+
+    // Why this row stopped, always - not only when nothing was found. Without
+    // it a list of names gives no clue whether they are matches or guesses.
+    const note = div(candidates.length ? "customer-note" : "customer-note none");
+    note.append(
+      div("customer-note-mark", candidates.length ? "?" : "!"),
+      div("customer-note-text", row.reason
+        || "This customer could not be matched in QuickBooks on its own.")
+    );
+    options.append(note);
+
+    if (candidates.length) options.append(div("customer-legend", "Already in QuickBooks"));
 
     for (const candidate of candidates) {
       const label = document.createElement("label");

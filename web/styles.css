@@ -1333,20 +1333,23 @@ td[data-key="__invoice"] .tag { display: block; margin-bottom: 3px; text-align: 
   text-transform: uppercase; letter-spacing: .06em; font-weight: 600;
 }
 
-/* A name with nothing like it in QuickBooks. Said as a finding, not as an
-   error - the search ran, and this is what it came back with. */
-.customer-empty {
+/* Why this row stopped. Stated as a finding, not an error - the search ran,
+   and this is what came back. Amber only when there is nothing to choose
+   from, because then the answer really is "it is not in QuickBooks". */
+.customer-note {
   display: flex; gap: 10px; align-items: flex-start;
-  margin: 2px 2px 8px; padding: 11px 12px; border-radius: 9px;
-  background: var(--warn-tint); color: var(--warn);
+  margin: 2px 2px 10px; padding: 11px 12px; border-radius: 9px;
+  background: var(--surface-2); color: var(--text);
   font-size: 12px; line-height: 1.55;
 }
-.customer-empty-mark {
+.customer-note-mark {
   flex: none; width: 17px; height: 17px; border-radius: 50%; margin-top: 1px;
   display: grid; place-items: center; font-size: 11px; font-weight: 700;
-  background: var(--warn); color: var(--surface);
+  background: var(--muted); color: var(--surface);
 }
-.customer-empty-text { min-width: 0; }
+.customer-note-text { min-width: 0; }
+.customer-note.none { background: var(--warn-tint); color: var(--warn); }
+.customer-note.none .customer-note-mark { background: var(--warn); }
 
 /* Each answer is a card you click anywhere on, with the radio drawn rather
    than left to the browser - the native one is tiny and sits badly next to a

@@ -913,7 +913,10 @@ class Runtime:
                     if selected is not None:
                         resolved.append(record.source_id)
                         continue
-                    reason = "The previously selected QuickBooks customer no longer exists."
+                    reason = (
+                        "The customer picked for this policy before has since been deleted "
+                        "from QuickBooks. Pick again."
+                    )
                 elif record.create_new_customer_selected:
                     resolved.append(record.source_id)
                     continue
@@ -929,11 +932,13 @@ class Runtime:
                         continue
                     if old_matches:
                         reason = (
-                            f"Old policy {record.old_policy_number} appears under more than one "
-                            "QuickBooks location. Choose the correct one."
+                            f"The expiring policy {record.old_policy_number} was billed to more "
+                            "than one customer in QuickBooks, so this one cannot be worked out "
+                            "on its own. Pick the right one."
                             if len(old_matches) > 1
-                            else f"Old policy {record.old_policy_number} was shortened in QuickBooks "
-                            "and could not be verified from the invoice Memo. Confirm the location."
+                            else f"The expiring policy {record.old_policy_number} is in QuickBooks "
+                            "but under a shortened number, so it could not be confirmed. Check "
+                            "this is the right customer."
                         )
                         candidates = old_matches
                         ambiguous.append({
@@ -961,13 +966,28 @@ class Runtime:
                         })
                         continue
                     if record.location:
-                        reason = (
-                            f"Location '{record.location}' matches more than one QuickBooks customer. "
-                            "Choose the correct location."
-                            if location_matches else
-                            f"Location '{record.location}' did not identify one QuickBooks customer. "
-                            "Choose the existing location, or explicitly create a new customer."
-                        )
+                        # Said in terms of what is on the screen below it. The
+                        # old wording told people to choose an existing
+                        # location even when none had been found, which reads
+                        # as the app hiding the answer rather than not having
+                        # one.
+                        if location_matches:
+                            reason = (
+                                f"More than one QuickBooks customer is recorded at "
+                                f"'{record.location}'. Pick the right one."
+                            )
+                        elif location_candidates:
+                            reason = (
+                                f"No QuickBooks customer is recorded at '{record.location}'. "
+                                f"The ones below have similar names - pick one if it is the "
+                                f"same business, or create a new customer."
+                            )
+                        else:
+                            reason = (
+                                f"This customer is not in QuickBooks. Nothing there matches the "
+                                f"name or the location '{record.location}', so creating it is "
+                                f"the only option here."
+                            )
                         ambiguous.append({
                             "source_id": record.source_id,
                             "customer_name": record.customer_name,
@@ -984,12 +1004,21 @@ class Runtime:
                     if exact is not None:
                         resolved.append(record.source_id)
                         continue
-                    reason = "Choose the existing location, or explicitly create a new customer."
+                    reason = ""   # worded below, once it is known what was found
 
                 key = record.quickbooks_customer_name.casefold()
                 if key not in candidate_cache:
                     candidate_cache[key] = list(gateway.customer_candidates(record.quickbooks_customer_name))
                 candidates = candidate_cache[key]
+                if not reason:
+                    reason = (
+                        "This exact name is not in QuickBooks. The customers below have "
+                        "similar names - pick one if it is the same business, or create a "
+                        "new customer."
+                        if candidates else
+                        "This customer is not in QuickBooks, and nothing there has a similar "
+                        "name, so creating it is the only option here."
+                    )
                 ambiguous.append({
                     "source_id": record.source_id,
                     "customer_name": record.customer_name,
