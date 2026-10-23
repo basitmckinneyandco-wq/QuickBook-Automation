@@ -7,6 +7,7 @@ second run from duplicating a first run's work.
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from time import sleep
 
@@ -30,6 +31,143 @@ SESSION_ERRORS = ("ticket parameter is invalid", "session is not open", "ticket 
 BUSY_ERRORS = ("in use by another user", "try again later", "is locked")
 MAX_BUSY_RETRIES = 4
 BUSY_PAUSE_SECONDS = 2.0
+
+# QuickBooks Desktop is sensitive to sustained SDK traffic. A completed row is
+# committed before the session is closed, so deliberately taking a short break
+# and opening a fresh SDK session cannot duplicate work but gives Desktop time
+# to catch up.
+ROWS_PER_QUICKBOOKS_SESSION = 8
+QUICKBOOKS_SESSION_PAUSE_SECONDS = 4.0
+
+# Common Line of Business abbreviations already used in QuickBooks. The
+# fallback below also understands consonant abbreviations such as prpty and
+# liab, but these explicit forms keep the most frequent cases unambiguous.
+_LOB_WORDS = {
+    "comm": "commercial",
+    "prop": "property",
+    "prpty": "property",
+    "gen": "general",
+    "genl": "general",
+    "liab": "liability",
+    "pkg": "package",
+    "prof": "professional",
+    "empl": "employment",
+    "wrks": "workers",
+    "work": "workers",
+    "comp": "compensation",
+}
+
+# Exact Line of Business equivalents that a word-by-word abbreviation rule
+# cannot safely infer. Every value is the single canonical meaning for that
+# group, making this deliberately symmetric: either spelling can already be
+# in QuickBooks and the other can arrive from the dashboard.
+_LOB_EQUIVALENTS = {
+    # Business Owners Policy / package.
+    "bop": "package",
+    "business owners policy": "package",
+    "business owner policy": "package",
+    "package": "package",
+    # Umbrella cover is often recorded as excess liability.
+    "umbrella": "umbrella",
+    "umbrella comm": "umbrella",
+    "commercial umbrella": "umbrella",
+    "umbrella commercial": "umbrella",
+    "excess liability": "umbrella",
+    "excess liability umbrella": "umbrella",
+    # Firearms / active-assailant cover. Includes the spellings reported from
+    # the sheet so a typo does not create a second QuickBooks job.
+    "firearms": "active assailant",
+    "fire arms": "active assailant",
+    "firms arms": "active assailant",
+    "active assailant": "active assailant",
+    "active assualat": "active assailant",
+    "active assault": "active assailant",
+    "shooting": "active assailant",
+    # Employment practices. "Accidental medical coverage" is included here
+    # because it is the agency's specified QuickBooks equivalent.
+    "epli": "employment practices liability",
+    "employment practices liability": "employment practices liability",
+    "employment practices liability insurance": "employment practices liability",
+    "accidental medical coverage": "employment practices liability",
+    "accedental medical coverage": "employment practices liability",
+    # Workers compensation.
+    "wc": "workers compensation",
+    "workers compensation": "workers compensation",
+    "worker compensation": "workers compensation",
+    "workers comp": "workers compensation",
+    "worker comp": "workers compensation",
+    "work comp": "workers compensation",
+    "worker s compensation": "workers compensation",
+    # Bonds.
+    "surety bond": "bond",
+    "surety": "bond",
+    "bond": "bond",
+    # Widely used insurance abbreviations that are the same coverage name.
+    "gl": "general liability",
+    "cgl": "general liability",
+    "general liability": "general liability",
+    "commercial general liability": "general liability",
+    "d o": "directors officers",
+    "directors officers": "directors officers",
+    "directors and officers": "directors officers",
+    "e o": "professional liability",
+    "errors omissions": "professional liability",
+    "errors and omissions": "professional liability",
+    "professional liability": "professional liability",
+    "cyber": "cyber liability",
+    "cyber liability": "cyber liability",
+}
+
+
+def _lob_phrase(value: str) -> str:
+    """A punctuation-insensitive LOB phrase, for exact business aliases."""
+    return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def _canonical_lob(value: str) -> str:
+    phrase = _lob_phrase(value)
+    return _LOB_EQUIVALENTS.get(phrase, phrase)
+
+
+def _lob_tokens(value: str) -> list[str]:
+    return [
+        _LOB_WORDS.get(token, token)
+        for token in re.findall(r"[a-z0-9]+", value.casefold())
+    ]
+
+
+def _lob_word_matches(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    short, long = sorted((left, right), key=len)
+    if len(short) < 3 or len(short) >= len(long) or short[0] != long[0]:
+        return False
+    # QuickBooks users commonly omit vowels/letters: genl/general,
+    # prpty/property, liab/liability. Requiring every abbreviation letter in
+    # order is intentionally conservative; a row is reused only if the whole
+    # phrase matches and only one job qualifies.
+    position = 0
+    for character in long:
+        if position < len(short) and short[position] == character:
+            position += 1
+    return position == len(short)
+
+
+def _lob_names_match(left: str, right: str) -> bool:
+    left_canonical = _canonical_lob(left)
+    right_canonical = _canonical_lob(right)
+    if left_canonical == right_canonical:
+        return bool(left_canonical)
+    left_tokens = _lob_tokens(left_canonical)
+    right_tokens = _lob_tokens(right_canonical)
+    return (
+        bool(left_tokens)
+        and len(left_tokens) == len(right_tokens)
+        and all(
+            _lob_word_matches(left_word, right_word)
+            for left_word, right_word in zip(left_tokens, right_tokens)
+        )
+    )
 
 # What differs between the kinds of policy invoice, for wording the result.
 _INVOICE_DETAIL = {
@@ -199,6 +337,7 @@ class Processor:
         while remaining:
             try:
                 with self.gateway_factory() as gateway:
+                    rows_this_session = 0
                     while remaining:
                         record = remaining[0]
                         result = self._process_one(gateway, record, operation)
@@ -228,6 +367,14 @@ class Processor:
                         results[record.source_id] = result
                         report(result)
                         remaining.pop(0)
+                        rows_this_session += 1
+                        if (
+                            self.config.live_writes_enabled
+                            and rows_this_session >= ROWS_PER_QUICKBOOKS_SESSION
+                            and remaining
+                        ):
+                            sleep(QUICKBOOKS_SESSION_PAUSE_SECONDS)
+                            break  # close the SDK session; reopen for the next group
                     else:
                         return  # finished the batch cleanly
             except QuickBooksError as exc:
@@ -257,7 +404,21 @@ class Processor:
         steps: list[str] = []
         try:
             # 1. The corporation / account name becomes the customer.
-            customer = gateway.find_customer(record.quickbooks_customer_name)
+            mapped = bool(record.mapped_customer_list_id)
+            customer = (
+                gateway.find_customer_by_id(record.mapped_customer_list_id)
+                if mapped
+                else gateway.find_customer(record.quickbooks_customer_name)
+            )
+
+            if mapped and customer is None:
+                return self._save(
+                    record,
+                    "needs_review",
+                    "The selected QuickBooks customer no longer exists. Choose the location again.",
+                    steps=steps,
+                    operation=operation,
+                )
 
             if operation is Operation.UPDATE_CUSTOMER:
                 if customer is None:
@@ -269,9 +430,28 @@ class Processor:
                         steps=steps,
                         operation=operation,
                     )
+                if mapped and customer.full_name.casefold() != record.quickbooks_customer_name.casefold():
+                    return self._save(
+                        record,
+                        "needs_review",
+                        "This policy is linked to an existing location customer. Its name was not "
+                        "changed; edit that customer directly in QuickBooks if it needs renaming.",
+                        steps=steps,
+                        customer_list_id=customer.list_id,
+                        operation=operation,
+                    )
                 updated = gateway.update_customer(record, customer)
                 steps.append(f"Customer '{updated.full_name}' updated in QuickBooks.")
-                job_list_id = self._sync_job(gateway, record, updated, steps)
+                job_list_id, job_problem = self._sync_job(gateway, record, updated, steps)
+                if job_problem:
+                    return self._save(
+                        record,
+                        "needs_review",
+                        job_problem,
+                        steps=steps,
+                        customer_list_id=updated.list_id,
+                        operation=operation,
+                    )
                 return self._save(
                     record,
                     "completed",
@@ -284,6 +464,21 @@ class Processor:
 
             name_shortened = record.customer_name_was_shortened or record.company_name_was_shortened
             if customer is None:
+                if self.config.mode == "quickbooks" and not record.create_new_customer_selected:
+                    suggestions = gateway.customer_candidates(record.quickbooks_customer_name)
+                    detail = (
+                        " Similar QuickBooks customers were found."
+                        if suggestions
+                        else " No matching QuickBooks customer was found."
+                    )
+                    return self._save(
+                        record,
+                        "needs_review",
+                        "Choose the correct QuickBooks location before sending this policy."
+                        + detail,
+                        steps=steps,
+                        operation=operation,
+                    )
                 customer = gateway.create_customer(record)
                 steps.append(f"Customer '{customer.full_name}' created.")
                 if name_shortened:
@@ -298,12 +493,31 @@ class Processor:
             target = customer
             job_list_id = None
             if record.has_job:
-                job = gateway.find_customer(record.quickbooks_job_full_name)
+                job, matches = self._find_lob_job(gateway, customer, record.quickbooks_job_name)
+                if len(matches) > 1:
+                    names = ", ".join(f"'{item.full_name}'" for item in matches)
+                    return self._save(
+                        record,
+                        "needs_review",
+                        f"More than one QuickBooks job matches Line of Business "
+                        f"'{record.quickbooks_job_name}': {names}. Choose or rename the job "
+                        "in QuickBooks; no new job was created.",
+                        steps=steps,
+                        customer_list_id=customer.list_id,
+                        operation=operation,
+                    )
                 if job is None:
                     job = gateway.create_job(record, customer)
                     steps.append(f"Job '{job.full_name}' created.")
-                else:
+                elif job.full_name.casefold() == (
+                    f"{customer.full_name}:{record.quickbooks_job_name}".casefold()
+                ):
                     steps.append(f"Job '{job.full_name}' already existed - reused.")
+                else:
+                    steps.append(
+                        f"Job '{job.full_name}' matches dashboard Line of Business "
+                        f"'{record.quickbooks_job_name}' - reused."
+                    )
                 target = job
                 job_list_id = job.list_id
 
@@ -436,7 +650,21 @@ class Processor:
             operation=spec["operation"],
         )
 
-    def _sync_job(self, gateway, record: WorkRecord, customer, steps: list[str]) -> str | None:
+    def _find_lob_job(self, gateway, customer, lob: str):
+        """Find one existing job equivalent to the dashboard LOB, never by policy."""
+        exact = gateway.find_customer(f"{customer.full_name}:{lob}")
+        if exact is not None:
+            return exact, [exact]
+
+        matches = [
+            job for job in gateway.customer_jobs(customer)
+            if _lob_names_match(lob, job.full_name.rsplit(":", 1)[-1])
+        ]
+        return (matches[0] if len(matches) == 1 else None), matches
+
+    def _sync_job(
+        self, gateway, record: WorkRecord, customer, steps: list[str]
+    ) -> tuple[str | None, str | None]:
         """Make the policy job in QuickBooks match the Line of Business we hold.
 
         If the job already exists under the expected name there is nothing to
@@ -445,12 +673,26 @@ class Processor:
         the old one orphaned and adding a duplicate beside it.
         """
         if not record.has_job:
-            return None
+            return None, None
 
-        job = gateway.find_customer(record.quickbooks_job_full_name)
+        job, matches = self._find_lob_job(gateway, customer, record.quickbooks_job_name)
+        if len(matches) > 1:
+            names = ", ".join(f"'{item.full_name}'" for item in matches)
+            return None, (
+                f"More than one QuickBooks job matches Line of Business "
+                f"'{record.quickbooks_job_name}': {names}. No job was changed."
+            )
         if job is not None:
-            steps.append(f"Job '{job.full_name}' already matches - nothing to change.")
-            return job.list_id
+            if job.full_name.casefold() == (
+                f"{customer.full_name}:{record.quickbooks_job_name}".casefold()
+            ):
+                steps.append(f"Job '{job.full_name}' already matches - nothing to change.")
+            else:
+                steps.append(
+                    f"Job '{job.full_name}' matches dashboard Line of Business "
+                    f"'{record.quickbooks_job_name}' - nothing to change."
+                )
+            return job.list_id, None
 
         state = self.store.get(record.source_id, self.mode)
         previous = (
@@ -461,11 +703,11 @@ class Processor:
         if previous is not None:
             renamed = gateway.rename_job(record, previous)
             steps.append(f"Job renamed from '{previous.full_name}' to '{renamed.full_name}'.")
-            return renamed.list_id
+            return renamed.list_id, None
 
         created = gateway.create_job(record, customer)
         steps.append(f"Job '{created.full_name}' created.")
-        return created.list_id
+        return created.list_id, None
 
     def _already_done(
         self, record: WorkRecord, operation: Operation = Operation.CREATE_INVOICE

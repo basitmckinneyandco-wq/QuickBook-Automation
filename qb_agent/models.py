@@ -167,6 +167,36 @@ class WorkRecord:
         return dict(self.extra).get(key, "").strip()
 
     @property
+    def mapped_customer_list_id(self) -> str:
+        """The exact QuickBooks destination selected in the dashboard."""
+        list_id = self._extra("qb_customer_id")
+        action = self._extra("qb_customer_action")
+        if action.startswith("old_policy:"):
+            remembered = action.split(":", 1)[1]
+            current = "".join(char for char in self.old_policy_number.casefold() if char.isalnum())
+            if remembered != current:
+                return ""
+        return list_id
+
+    @property
+    def mapped_customer_name(self) -> str:
+        return self._extra("qb_customer_target")
+
+    @property
+    def create_new_customer_selected(self) -> bool:
+        return self._extra("qb_customer_action").casefold() == "create"
+
+    @property
+    def old_policy_number(self) -> str:
+        """The expiring policy number, available on Renewal rows only."""
+        return self._extra("old_policy_number")
+
+    @property
+    def location(self) -> str:
+        """The insured location supplied by a New Business sheet row."""
+        return self._extra("location")
+
+    @property
     def premium_item(self) -> str:
         """Carrier Type decides the QuickBooks item: Standard or Non-Standard."""
         value = self._extra("carrier_type").casefold()

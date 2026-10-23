@@ -15,8 +15,10 @@ import os
 import re
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from hashlib import sha1
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Protocol
 from xml.etree import ElementTree as ET
 
@@ -26,6 +28,7 @@ from .qbxml import (
     QbResponse,
     QbxmlBuilder,
     parse_invoice_matches,
+    parse_customer_matches,
     parse_response,
 )
 
@@ -43,6 +46,32 @@ MAX_SHIP_VIA_NAME = 15
 FEES_REF_NUMBER = "Fee"
 
 
+def _normal_name(value: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def _search_token(value: str) -> str:
+    """A distinctive first word accepted by QuickBooks' Contains filter."""
+    words = [word for word in re.findall(r"[A-Za-z0-9]+", value) if len(word) >= 3]
+    return words[0] if words else ""
+
+
+def _rank_customers(name: str, customers: list["CustomerEntity"]) -> list["CustomerEntity"]:
+    """Put likely location variants first and discard unrelated results."""
+    wanted = _normal_name(name)
+    wanted_words = set(wanted.split())
+
+    def score(entity: "CustomerEntity") -> float:
+        candidate = _normal_name(entity.full_name)
+        overlap = len(wanted_words & set(candidate.split())) / max(1, len(wanted_words))
+        contained = 1.0 if wanted and wanted in candidate else 0.0
+        similarity = SequenceMatcher(None, wanted, candidate).ratio()
+        return contained * 2 + overlap + similarity
+
+    ranked = sorted(customers, key=lambda entity: (-score(entity), entity.full_name.casefold()))
+    return [entity for entity in ranked if score(entity) >= 1.15][:25]
+
+
 def fees_memo(policy_number: str) -> str:
     """The Memo on a fees invoice: its only link back to the policy."""
     return f"Policy #: {policy_number.strip()}"
@@ -58,6 +87,7 @@ class CustomerEntity:
     full_name: str
     edit_sequence: str = ""   # needed before QuickBooks will accept a change
     notes: str = ""           # the Note box on a customer or job
+    parent_list_id: str = ""  # set for a job; blank for a top-level customer
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +97,7 @@ class InvoiceEntity:
     customer_list_id: str | None = None
     edit_sequence: str = ""   # needed before QuickBooks will accept a change
     line_id: str = ""         # the one premium line, so a change replaces it
+    memo: str = ""
 
 
 class QuickBooksGateway(Protocol):
@@ -75,6 +106,9 @@ class QuickBooksGateway(Protocol):
     def current_company_file(self) -> str: ...
     def find_customer(self, full_name: str) -> CustomerEntity | None: ...
     def find_customer_by_id(self, list_id: str) -> CustomerEntity | None: ...
+    def customer_candidates(self, name: str) -> list[CustomerEntity]: ...
+    def customer_jobs(self, parent: CustomerEntity) -> list[CustomerEntity]: ...
+    def find_invoices(self, ref_number: str) -> list[InvoiceEntity]: ...
     def rename_job(self, record: WorkRecord, existing: CustomerEntity) -> CustomerEntity: ...
     def create_customer(self, record: WorkRecord) -> CustomerEntity: ...
     def update_customer(self, record: WorkRecord, existing: CustomerEntity) -> CustomerEntity: ...
@@ -130,10 +164,7 @@ class RequestProcessorTransport(AbstractContextManager["RequestProcessorTranspor
                 if not same_company_file(actual, self.company_file):
                     raise QuickBooksError(
                         f"Wrong QuickBooks company is open. Expected {self.company_file!r}; "
-                        f"QuickBooks has {actual!r}. If these are the same file reached "
-                        f"two ways - a mapped drive on one machine and \\\\server\\share "
-                        f"on another - open the Status page and pick the company again, "
-                        f"which saves the name this machine uses."
+                        f"QuickBooks has {actual!r}."
                     )
             return self
         except Exception as exc:
@@ -247,6 +278,7 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         fees: InvoiceKindConfig | None = None,
         transaction_types: TransactionTypeConfig | None = None,
         source_aliases: dict[str, str] | None = None,
+        write_pause_seconds: float = 1.25,
     ):
         self.transport = RequestProcessorTransport(company_file, app_name)
         self.builder = QbxmlBuilder(qbxml_version)
@@ -259,6 +291,10 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         self.source_aliases = {
             _rep_key(said): meant for said, meant in (source_aliases or {}).items()
         }
+        # One SDK write at a time with breathing room. This prevents a batch
+        # of adds/mods from overwhelming QuickBooks Desktop's UI process.
+        self.write_pause_seconds = max(0.0, write_pause_seconds)
+        self._last_write_at = 0.0
         # These lists are read once per session, not once per invoice.
         self._transaction_types: dict[str, str] | None = None
         self._reps: dict[str, str] | None = None
@@ -284,6 +320,7 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
             response.full_name or full_name,
             response.edit_sequence or "",
             response.notes or "",
+            response.parent_list_id or "",
         )
 
     def find_customer_by_id(self, list_id: str) -> CustomerEntity | None:
@@ -295,7 +332,55 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
             response.full_name or "",
             response.edit_sequence or "",
             response.notes or "",
+            response.parent_list_id or "",
         )
+
+    def customer_candidates(self, name: str) -> list[CustomerEntity]:
+        """Read-only suggestions for a sheet corporation name.
+
+        QuickBooks returns jobs from the same CustomerQuery.  Only top-level
+        customers belong in the location picker; jobs are handled after the
+        customer has been chosen.
+        """
+        token = _search_token(name)
+        if not token:
+            return []
+        xml = self.transport.request(self.builder.customer_search(token))
+        self._raise_on_error(xml)
+        found = [
+            CustomerEntity(
+                response.list_id or "",
+                response.full_name or "",
+                response.edit_sequence or "",
+                response.notes or "",
+                response.parent_list_id or "",
+            )
+            for response in parse_customer_matches(xml)
+            if response.list_id and response.full_name and ":" not in response.full_name
+        ]
+        return _rank_customers(name, found)
+
+    def customer_jobs(self, parent: CustomerEntity) -> list[CustomerEntity]:
+        """Return only jobs directly below the already-selected customer."""
+        xml = self.transport.request(self.builder.customer_search(parent.full_name))
+        self._raise_on_error(xml)
+        prefix = parent.full_name.casefold() + ":"
+        return [
+            CustomerEntity(
+                response.list_id or "",
+                response.full_name or "",
+                response.edit_sequence or "",
+                response.notes or "",
+                response.parent_list_id or "",
+            )
+            for response in parse_customer_matches(xml)
+            if response.list_id
+            and response.full_name
+            and (
+                response.parent_list_id == parent.list_id
+                or response.full_name.casefold().startswith(prefix)
+            )
+        ]
 
     def rename_job(self, record: WorkRecord, existing: CustomerEntity) -> CustomerEntity:
         if not existing.edit_sequence:
@@ -335,7 +420,8 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         response = self._send(self.builder.job_add(record, parent.list_id))
         if not response.list_id:
             raise QuickBooksError("QuickBooks did not return a ListID for the new job.")
-        return CustomerEntity(response.list_id, response.full_name or record.quickbooks_job_full_name)
+        expected = f"{parent.full_name}:{record.quickbooks_job_name}"
+        return CustomerEntity(response.list_id, response.full_name or expected)
 
     def find_invoice(self, ref_number: str) -> InvoiceEntity | None:
         response = self._query(self.builder.invoice_query(ref_number))
@@ -348,6 +434,23 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
             response.edit_sequence or "",
             response.line_id or "",
         )
+
+    def find_invoices(self, ref_number: str) -> list[InvoiceEntity]:
+        """All invoices with one number, used to locate a Renewal's old customer."""
+        xml = self.transport.request(self.builder.invoice_query(ref_number))
+        self._raise_on_error(xml)
+        return [
+            InvoiceEntity(
+                match["txn_id"],
+                match["ref_number"] or ref_number,
+                match["customer_list_id"] or None,
+                match["edit_sequence"],
+                match["line_id"],
+                match["memo"],
+            )
+            for match in parse_invoice_matches(xml)
+            if match["txn_id"]
+        ]
 
     def create_invoice(self, record: WorkRecord, customer_list_id: str) -> InvoiceEntity:
         response = self._send(
@@ -762,10 +865,20 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         return responses[0]
 
     def _send(self, qbxml: str) -> QbResponse:
-        response = self._first(qbxml)
-        if not response.ok:
-            raise QuickBooksError(f"QuickBooks error {response.status_code}: {response.status_message}")
-        return response
+        pause = self.write_pause_seconds - (monotonic() - self._last_write_at)
+        if pause > 0:
+            sleep(pause)
+        try:
+            response = self._first(qbxml)
+            if not response.ok:
+                raise QuickBooksError(
+                    f"QuickBooks error {response.status_code}: {response.status_message}"
+                )
+            return response
+        finally:
+            # Even a rejected write can leave Desktop briefly busy, so the
+            # next request is paced too.
+            self._last_write_at = monotonic()
 
     def _query(self, qbxml: str) -> QbResponse | None:
         """Like _send, but "no such record" is an answer rather than a failure."""
@@ -811,8 +924,9 @@ class DryRunQuickBooksGateway(AbstractContextManager["DryRunQuickBooksGateway"])
         return entity
 
     def create_job(self, record: WorkRecord, parent: CustomerEntity) -> CustomerEntity:
-        full_name = record.quickbooks_job_full_name
+        full_name = f"{parent.full_name}:{record.quickbooks_job_name}"
         entity = CustomerEntity(_fake_id("job", full_name), full_name, "1")
+        entity = CustomerEntity(entity.list_id, entity.full_name, entity.edit_sequence, "", parent.list_id)
         self.customers[full_name.casefold()] = entity
         return entity
 
@@ -820,6 +934,18 @@ class DryRunQuickBooksGateway(AbstractContextManager["DryRunQuickBooksGateway"])
         return next(
             (entity for entity in self.customers.values() if entity.list_id == list_id), None
         )
+
+    def customer_candidates(self, name: str) -> list[CustomerEntity]:
+        top_level = [entity for entity in self.customers.values() if ":" not in entity.full_name]
+        return _rank_customers(name, top_level)
+
+    def customer_jobs(self, parent: CustomerEntity) -> list[CustomerEntity]:
+        prefix = parent.full_name.casefold() + ":"
+        return [
+            entity for entity in self.customers.values()
+            if entity.parent_list_id == parent.list_id
+            or entity.full_name.casefold().startswith(prefix)
+        ]
 
     def rename_job(self, record: WorkRecord, existing: CustomerEntity) -> CustomerEntity:
         full_name = record.quickbooks_job_full_name
@@ -830,6 +956,13 @@ class DryRunQuickBooksGateway(AbstractContextManager["DryRunQuickBooksGateway"])
 
     def find_invoice(self, ref_number: str) -> InvoiceEntity | None:
         return self.invoices.get(ref_number.casefold())
+
+    def find_invoices(self, ref_number: str) -> list[InvoiceEntity]:
+        wanted = ref_number.casefold()
+        return [
+            invoice for key, invoice in self.invoices.items()
+            if key == wanted or ("|" in key and key.split("|", 1)[1] == wanted)
+        ]
 
     def create_invoice(self, record: WorkRecord, customer_list_id: str) -> InvoiceEntity:
         entity = InvoiceEntity(
@@ -1078,52 +1211,64 @@ def _fake_id(kind: str, value: str) -> str:
     return f"DRY-{kind[:3].upper()}-{sha1(value.encode('utf-8')).hexdigest()[:12].upper()}"
 
 
+def _mapped_drive_to_unc(value: str) -> str:
+    """Translate a Windows mapped-drive path to its network (UNC) spelling.
+
+    QuickBooks can report ``Z:\\folder\\company.qbw`` while configuration made
+    from another view of the same share holds
+    ``\\\\server\\share\\folder\\company.qbw``. WNetGetUniversalName resolves
+    that alias without opening or changing the company file.
+    """
+    if os.name != "nt" or value.startswith("\\\\"):
+        return value
+    drive, _ = os.path.splitdrive(value)
+    if not drive:
+        return value
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class UniversalNameInfo(ctypes.Structure):
+            _fields_ = [("name", wintypes.LPWSTR)]
+
+        function = ctypes.windll.mpr.WNetGetUniversalNameW
+        function.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        function.restype = wintypes.DWORD
+        size = wintypes.DWORD(0)
+        error_more_data = 234
+        if function(value, 1, None, ctypes.byref(size)) != error_more_data or not size.value:
+            return value
+        buffer = ctypes.create_string_buffer(size.value)
+        if function(value, 1, buffer, ctypes.byref(size)) != 0:
+            return value
+        translated = ctypes.cast(
+            buffer, ctypes.POINTER(UniversalNameInfo)
+        ).contents.name
+        return translated or value
+    except (AttributeError, OSError, ValueError):
+        return value
+
+
 def _normal_path(value: str) -> str:
-    """One spelling for a path, so two names for one file compare equal.
-
-    A mapped drive is the same folder as the share behind it under another
-    name: Z:\\Intuit\\... on one machine is \\\\alizain\\d\\Intuit\\... on the
-    one sharing it. The settings file is copied between machines, so unless
-    the two are brought together the app sees a different company and refuses
-    to work with the one that is open.
-    """
-    return os.path.normcase(os.path.abspath(_share_path(value.strip())))
+    absolute = os.path.abspath(value.strip())
+    return os.path.normcase(os.path.normpath(_mapped_drive_to_unc(absolute)))
 
 
-def _share_path(path: str) -> str:
-    """A mapped drive rewritten as the share it stands for, where it is one.
-
-    Left alone for a local drive or a path that is already a share, and
-    whenever Windows will not say - a guess here would be worse than the
-    plain path, which still matches itself.
-    """
-    drive = os.path.splitdrive(path)[0]
-    if len(drive) != 2 or not drive.endswith(":"):
-        return path          # already \\server\share, or no drive at all
-    try:
-        import win32wnet  # type: ignore
-
-        return win32wnet.WNetGetUniversalName(path, 1)
-    except Exception:
-        return path          # a local drive, or pywin32 is not installed
-
-
-def same_company_file(one: str, two: str) -> bool:
-    """Whether two paths name the same QuickBooks company file.
-
-    Compared as text first, with mapped drives resolved. Failing that, the
-    two are put to Windows itself: a company reached as D:\\... on the machine
-    sharing it and as \\\\server\\d\\... from another is one file, and only the
-    file system can say so.
-    """
-    if not one.strip() or not two.strip():
+def same_company_file(left: str, right: str) -> bool:
+    """Whether two path spellings identify the same QuickBooks company file."""
+    if not left.strip() or not right.strip():
         return False
-    if _normal_path(one) == _normal_path(two):
+    if _normal_path(left) == _normal_path(right):
         return True
+    # File identity is a second, stronger check. On Windows this compares the
+    # volume serial number and file index, so aliases can pass but a different
+    # company file with the same filename cannot.
     try:
-        return os.path.samefile(one, two)
+        return os.path.samefile(left, right)
     except OSError:
-        # One of them cannot be reached from here - a share that is offline,
-        # or a drive letter this machine does not have. Not the same file as
-        # far as anyone can tell, which is the safe answer.
         return False

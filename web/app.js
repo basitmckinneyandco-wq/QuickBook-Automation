@@ -3247,6 +3247,156 @@ function setBusy(button, busyLabel) {
   button.innerHTML = `<span class="spinner-sm"></span>${busyLabel}`;
 }
 
+async function customerResolutions(ids) {
+  const resolution = await api(
+    "/api/customer-resolutions",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    },
+    SEND_TIMEOUT_MS
+  );
+  const automatic = resolution.automatic_choices || [];
+  if (!automatic.length) return resolution;
+
+  const saved = await api(
+    "/api/customer-mappings",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ choices: automatic }),
+    },
+    SEND_TIMEOUT_MS
+  );
+  state.records = saved.records || state.records;
+  if (!saved.sheet_saved) {
+    throw new Error(`Automatic QuickBooks location matches could not be saved to Google Sheets: ${saved.warning}`);
+  }
+  resolution.resolved_ids = [
+    ...(resolution.resolved_ids || []),
+    ...(saved.saved || []),
+  ];
+  resolution.automatic_match_count = (saved.saved || []).length;
+  if (resolution.automatic_match_count) {
+    toast(
+      `${resolution.automatic_match_count} QuickBooks location${resolution.automatic_match_count === 1 ? "" : "s"} matched automatically.`
+    );
+  }
+  return resolution;
+}
+
+/** Ask for exact QuickBooks destinations, save them to the hidden sheet columns,
+    and return the rows that are now safe to send. */
+function chooseQuickBooksCustomers(rows) {
+  if (!rows.length) return Promise.resolve([]);
+  const dialog = $("customerDialog");
+  const choices = $("customerChoices");
+  $("customerSubtitle").textContent =
+    `${rows.length} polic${rows.length === 1 ? "y needs" : "ies need"} a location choice`;
+  $("customerNote").textContent = "Every row needs a choice before continuing.";
+
+  choices.replaceChildren(...rows.map((row) => {
+    const card = div("customer-row");
+    const head = div("customer-row-head");
+    const title = document.createElement("strong");
+    title.textContent = row.customer_name || "Unnamed customer";
+    const detail = document.createElement("span");
+    detail.textContent = [row.policy_number && `Policy ${row.policy_number}`, row.job_name]
+      .filter(Boolean).join(" · ") || row.reason;
+    head.append(title, detail);
+
+    const options = div("customer-options");
+    for (const candidate of row.candidates || []) {
+      const label = document.createElement("label");
+      label.className = "customer-option";
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = `customer-${row.source_id}`;
+      radio.value = candidate.list_id;
+      radio.dataset.sourceId = row.source_id;
+      radio.dataset.action = "use_existing";
+      label.append(radio, document.createTextNode(candidate.full_name));
+      options.append(label);
+    }
+    const create = document.createElement("label");
+    create.className = "customer-option create-new";
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = `customer-${row.source_id}`;
+    radio.value = "";
+    radio.dataset.sourceId = row.source_id;
+    radio.dataset.action = "create";
+    create.append(radio, document.createTextNode(`Create new customer “${row.customer_name}”`));
+    options.append(create);
+    card.append(head, options);
+    return card;
+  }));
+
+  const continueButton = $("customerContinue");
+  const update = () => {
+    const picked = choices.querySelectorAll('input[type="radio"]:checked').length;
+    continueButton.disabled = picked !== rows.length;
+    $("customerNote").textContent = picked === rows.length
+      ? "Choices will be saved back to Google Sheets."
+      : `${rows.length - picked} location choice${rows.length - picked === 1 ? "" : "s"} remaining.`;
+  };
+  choices.addEventListener("change", update);
+
+  return new Promise((resolve) => {
+    const cleanup = (answer) => {
+      continueButton.removeEventListener("click", save);
+      $("customerCancel").removeEventListener("click", cancel);
+      $("customerClose").removeEventListener("click", cancel);
+      dialog.removeEventListener("close", cancel);
+      choices.removeEventListener("change", update);
+      if (dialog.open) dialog.close();
+      resolve(answer);
+    };
+    const cancel = () => cleanup([]);
+    const save = async () => {
+      const selected = [...choices.querySelectorAll('input[type="radio"]:checked')];
+      if (selected.length !== rows.length) return;
+      continueButton.disabled = true;
+      continueButton.innerHTML = '<span class="spinner-sm"></span>Saving…';
+      try {
+        const payload = await api(
+          "/api/customer-mappings",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              choices: selected.map((radio) => ({
+                source_id: radio.dataset.sourceId,
+                action: radio.dataset.action,
+                list_id: radio.value,
+              })),
+            }),
+          },
+          SEND_TIMEOUT_MS
+        );
+        state.records = payload.records || state.records;
+        if (!payload.sheet_saved) {
+          toast(`Customer choices were not saved to Google Sheets: ${payload.warning}`, true);
+          continueButton.disabled = false;
+          return;
+        }
+        cleanup(payload.saved || []);
+      } catch (error) {
+        toast(error.message, true);
+        continueButton.disabled = false;
+      } finally {
+        continueButton.textContent = "Save and continue";
+      }
+    };
+    continueButton.addEventListener("click", save);
+    $("customerCancel").addEventListener("click", cancel);
+    $("customerClose").addEventListener("click", cancel);
+    dialog.addEventListener("close", cancel);
+    dialog.showModal();
+  });
+}
+
 /* QuickBooks Desktop's SDK only tolerates one session at a time - opening
    several at once (e.g. clicking Send on five rows in a row) can leave later
    ones waiting on an earlier one indefinitely, which looked like the button
@@ -3267,6 +3417,16 @@ function runQueued(task) {
 /** Send or update a single policy's customer, without touching the checkboxes.
     Clicking the row button is itself the confirmation - no popup on top of it. */
 async function actOnPolicy(sourceId, operation, button, label = "") {
+  try {
+    const resolution = await customerResolutions([sourceId]);
+    if ((resolution.ambiguous || []).length) {
+      const ready = await chooseQuickBooksCustomers(resolution.ambiguous);
+      if (!ready.length) return;
+    }
+  } catch (error) {
+    toast(error.message, true);
+    return;
+  }
   const busyLabel = label || (operation === "update_customer" ? "Updating…" : "Sending…");
   const waiting = queueDepth > 0;
   const startLabel = waiting ? "Queued…" : busyLabel;
@@ -3556,9 +3716,46 @@ function stopWatchingProgress() {
 }
 
 /** Send one batch of rows for one operation, with the bulk button as progress. */
-async function processBatch(operation, ids, buttonId, { noun, label, clear = false } = {}) {
+async function processBatch(
+  operation,
+  ids,
+  buttonId,
+  { noun, label, clear = false, skipResolution = false } = {}
+) {
   if (!ids.length) return;
   const batch = ids.slice(0, MAX_SELECTION);   // the server refuses more anyway
+  if (!skipResolution) {
+    try {
+      const resolution = await customerResolutions(batch);
+      const resolved = resolution.resolved_ids || [];
+      if (resolved.length) {
+        await processBatch(operation, resolved, buttonId, {
+          noun: `${resolved.length} resolved polic${resolved.length === 1 ? "y" : "ies"}`,
+          label,
+          clear,
+          skipResolution: true,
+        });
+      }
+      const ambiguous = resolution.ambiguous || [];
+      if (ambiguous.length) {
+        const newlyResolved = await chooseQuickBooksCustomers(ambiguous);
+        if (newlyResolved.length) {
+          await processBatch(operation, newlyResolved, buttonId, {
+            noun: `${newlyResolved.length} selected polic${newlyResolved.length === 1 ? "y" : "ies"}`,
+            label,
+            clear,
+            skipResolution: true,
+          });
+        }
+      }
+      if ((resolution.unknown_ids || []).length) {
+        toast(`${resolution.unknown_ids.length} policies are no longer loaded. Refresh and try again.`, true);
+      }
+    } catch (error) {
+      toast(error.message, true);
+    }
+    return;
+  }
   const button = $(buttonId);
   const what = noun || `${batch.length} polic${batch.length === 1 ? "y" : "ies"}`;
   setBusy(button, queueDepth > 0 ? "Queued…" : `Working on ${what}…`);

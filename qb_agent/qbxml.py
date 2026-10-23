@@ -34,6 +34,7 @@ class QbResponse:
     customer_list_id: str | None = None
     notes: str | None = None
     line_id: str | None = None
+    parent_list_id: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -59,7 +60,7 @@ class QbxmlBuilder:
         ET.SubElement(request, "FullName").text = full_name
         # EditSequence is required before any CustomerMod can be sent, and
         # Notes has to be asked for or it comes back empty and gets overwritten.
-        for element in ("ListID", "FullName", "EditSequence", "Notes"):
+        for element in ("ListID", "FullName", "EditSequence", "ParentRef", "Notes"):
             ET.SubElement(request, "IncludeRetElement").text = element
         return self._serialize(root)
 
@@ -67,7 +68,18 @@ class QbxmlBuilder:
         """Look a customer or job up by ListID, to see what it is called now."""
         root, request = self._envelope("CustomerQueryRq", request_id)
         ET.SubElement(request, "ListID").text = list_id
-        for element in ("ListID", "FullName", "EditSequence", "Notes"):
+        for element in ("ListID", "FullName", "EditSequence", "ParentRef", "Notes"):
+            ET.SubElement(request, "IncludeRetElement").text = element
+        return self._serialize(root)
+
+    def customer_search(self, name: str, request_id: str = "customer-search") -> str:
+        """Find customers whose name contains a useful part of the sheet name."""
+        root, request = self._envelope("CustomerQueryRq", request_id)
+        ET.SubElement(request, "MaxReturned").text = "200"
+        name_filter = ET.SubElement(request, "NameFilter")
+        ET.SubElement(name_filter, "MatchCriterion").text = "Contains"
+        ET.SubElement(name_filter, "Name").text = name
+        for element in ("ListID", "FullName", "EditSequence", "ParentRef", "Notes"):
             ET.SubElement(request, "IncludeRetElement").text = element
         return self._serialize(root)
 
@@ -390,6 +402,7 @@ def parse_response(xml: str) -> list[QbResponse]:
                 customer_list_id=_find_text(returned, "CustomerRef/ListID"),
                 notes=_find_text(returned, "Notes"),
                 line_id=_find_text(returned, "InvoiceLineRet/TxnLineID"),
+                parent_list_id=_find_text(returned, "ParentRef/ListID"),
             )
         )
     return responses
@@ -413,6 +426,30 @@ def parse_invoice_matches(xml: str) -> list[dict[str, str]]:
         }
         for ret in ET.fromstring(xml).iter("InvoiceRet")
     ]
+
+
+def parse_customer_matches(xml: str) -> list[QbResponse]:
+    """Every customer/job returned by a CustomerQueryRq."""
+    responses: list[QbResponse] = []
+    root = ET.fromstring(xml)
+    for reply in root.findall(".//CustomerQueryRs"):
+        status_code = int(reply.attrib.get("statusCode", "-1"))
+        status_severity = reply.attrib.get("statusSeverity", "Error")
+        status_message = reply.attrib.get("statusMessage", "Unknown QuickBooks response")
+        for returned in reply.findall("CustomerRet"):
+            responses.append(
+                QbResponse(
+                    status_code=status_code,
+                    status_severity=status_severity,
+                    status_message=status_message,
+                    list_id=_find_text(returned, "ListID"),
+                    full_name=_find_text(returned, "FullName"),
+                    edit_sequence=_find_text(returned, "EditSequence"),
+                    notes=_find_text(returned, "Notes"),
+                    parent_list_id=_find_text(returned, "ParentRef/ListID"),
+                )
+            )
+    return responses
 
 
 def _find_text(node: ET.Element | None, tag: str) -> str | None:

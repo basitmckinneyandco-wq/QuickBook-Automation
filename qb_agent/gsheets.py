@@ -31,6 +31,15 @@ STATUS_HEADERS = {
     "qb_fees": "qb fees",
 }
 
+# Saved by the customer resolver.  They are hidden in Google Sheets: staff use
+# the dashboard picker, while these stable IDs let every computer make the same
+# choice next time without asking again.
+MAPPING_HEADERS = {
+    "qb_customer_target": "qb customer target",
+    "qb_customer_id": "qb customer id",
+    "qb_customer_action": "qb customer action",
+}
+
 
 class SheetsError(RuntimeError):
     """The sheet could not be read or written."""
@@ -159,6 +168,81 @@ class Sheets:
         payload = self._call("/values:batchUpdate", body)
         return int(payload.get("totalUpdatedCells", 0))
 
+    def hide_columns(self, title: str, columns: Sequence[int]) -> None:
+        """Hide zero-based columns in one tab; values remain available to the app."""
+        wanted = sorted(set(int(column) for column in columns if column >= 0))
+        if not wanted:
+            return
+        info = self._call("?fields=sheets.properties(sheetId,title)")
+        sheet_id = next(
+            (
+                sheet.get("properties", {}).get("sheetId")
+                for sheet in info.get("sheets", [])
+                if sheet.get("properties", {}).get("title") == title
+            ),
+            None,
+        )
+        if sheet_id is None:
+            raise SheetsError(f"The sheet tab '{title}' could not be found.")
+        self._call(
+            ":batchUpdate",
+            {
+                "requests": [
+                    {
+                        "updateDimensionProperties": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "dimension": "COLUMNS",
+                                "startIndex": column,
+                                "endIndex": column + 1,
+                            },
+                            "properties": {"hiddenByUser": True},
+                            "fields": "hiddenByUser",
+                        }
+                    }
+                    for column in wanted
+                ]
+            },
+        )
+
+    def ensure_column_count(self, title: str, required: int) -> None:
+        """Expand one tab when a new value would fall beyond its grid limit.
+
+        The Values API does not automatically grow a sheet.  It instead
+        returns HTTP 400 "range exceeds grid limits", so dashboard-owned
+        columns must be added to the grid before their headers are written.
+        """
+        info = self._call(
+            "?fields=sheets.properties(sheetId,title,gridProperties.columnCount)"
+        )
+        properties = next(
+            (
+                sheet.get("properties", {})
+                for sheet in info.get("sheets", [])
+                if sheet.get("properties", {}).get("title") == title
+            ),
+            None,
+        )
+        if properties is None:
+            raise SheetsError(f"The sheet tab '{title}' could not be found.")
+        current = int(properties.get("gridProperties", {}).get("columnCount", 0))
+        if current >= required:
+            return
+        self._call(
+            ":batchUpdate",
+            {
+                "requests": [
+                    {
+                        "appendDimension": {
+                            "sheetId": properties.get("sheetId"),
+                            "dimension": "COLUMNS",
+                            "length": required - current,
+                        }
+                    }
+                ]
+            },
+        )
+
 
 def status_columns(rows: Iterable[Sequence[object]], limit: int = 12) -> dict[str, int]:
     """Where the four QB status columns are, found by their header text.
@@ -177,3 +261,29 @@ def status_columns(rows: Iterable[Sequence[object]], limit: int = 12) -> dict[st
         if len(found) == len(STATUS_HEADERS):
             return found
     return {}
+
+
+def sheet_columns(rows: Iterable[Sequence[object]], limit: int = 12) -> dict[str, int]:
+    """All dashboard-owned columns already present in a tab."""
+    headers = {**STATUS_HEADERS, **MAPPING_HEADERS}
+    best: dict[str, int] = {}
+    for row in list(rows)[:limit]:
+        lowered = [str(cell).strip().casefold() for cell in row]
+        found = {
+            field: lowered.index(header)
+            for field, header in headers.items()
+            if header in lowered
+        }
+        if len(found) > len(best):
+            best = found
+    return best
+
+
+def dashboard_header_row(rows: Iterable[Sequence[object]], limit: int = 12) -> int:
+    """One-based row containing the existing QB status headers."""
+    expected = set(STATUS_HEADERS.values())
+    for number, row in enumerate(list(rows)[:limit], start=1):
+        lowered = {str(cell).strip().casefold() for cell in row}
+        if lowered & expected:
+            return number
+    return 1

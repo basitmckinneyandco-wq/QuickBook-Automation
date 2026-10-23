@@ -2,10 +2,12 @@ import unittest
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
+from unittest.mock import patch
 from xml.etree import ElementTree as ET
 
 from qb_agent.models import InvoiceSpec, WorkRecord
 from qb_agent.qbxml import QbxmlBuilder, parse_response
+from qb_agent.quickbooks import _normal_path, same_company_file
 
 BUILDER = QbxmlBuilder("13.0")
 
@@ -24,6 +26,35 @@ RECORD = WorkRecord(
     rate=Decimal("0"),
     amount=Decimal("450"),
 )
+
+
+class CompanyPathTests(unittest.TestCase):
+    def test_mapped_drive_and_unc_spelling_compare_as_one_company(self):
+        def mapped_to_unc(value: str) -> str:
+            if value.casefold().startswith("z:\\"):
+                return r"\\alizain\d" + value[2:]
+            return value
+
+        with patch("qb_agent.quickbooks._mapped_drive_to_unc", side_effect=mapped_to_unc):
+            self.assertEqual(
+                _normal_path(r"Z:\Intuit\QuickBooks\Company Files\mighty ventures llc.qbw"),
+                _normal_path(
+                    r"\\alizain\d\Intuit\QuickBooks\Company Files\mighty ventures llc.qbw"
+                ),
+            )
+
+    def test_file_identity_accepts_an_alias_but_not_just_the_same_filename(self):
+        with (
+            patch("qb_agent.quickbooks._mapped_drive_to_unc", side_effect=lambda value: value),
+            patch("qb_agent.quickbooks.os.path.samefile", return_value=True),
+        ):
+            self.assertTrue(same_company_file(r"Z:\company.qbw", r"\\server\share\company.qbw"))
+
+        with (
+            patch("qb_agent.quickbooks._mapped_drive_to_unc", side_effect=lambda value: value),
+            patch("qb_agent.quickbooks.os.path.samefile", return_value=False),
+        ):
+            self.assertFalse(same_company_file(r"C:\one\company.qbw", r"D:\two\company.qbw"))
 
 
 class QbxmlTests(unittest.TestCase):
@@ -158,6 +189,14 @@ class QbxmlTests(unittest.TestCase):
 
     def test_version_header_is_declared(self):
         self.assertIn('<?qbxml version="13.0"?>', BUILDER.customer_query("Acme"))
+
+    def test_customer_candidate_search_is_read_only_and_limited(self):
+        request = ET.fromstring(_body(BUILDER.customer_search("Dpeg"))).find(
+            ".//CustomerQueryRq"
+        )
+        self.assertEqual(request.findtext("MaxReturned"), "200")
+        self.assertEqual(request.findtext("NameFilter/MatchCriterion"), "Contains")
+        self.assertEqual(request.findtext("NameFilter/Name"), "Dpeg")
 
     def test_parse_success_response(self):
         xml = """<?xml version="1.0"?><QBXML><QBXMLMsgsRs>
@@ -329,6 +368,7 @@ class PremiumInvoiceTests(unittest.TestCase):
             asked = [n.text for n in request.findall("IncludeRetElement")]
             self.assertIn("Notes", asked)
             self.assertIn("EditSequence", asked)
+            self.assertIn("ParentRef", asked)
 
     def test_transaction_type_comes_from_the_policy_type_column(self):
         """The row's Policy type column is a dropdown of QuickBooks' own

@@ -66,6 +66,18 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(runtime.health(), indent=2, default=str))
         return 0
 
+    # A transferred installation intentionally starts with no company path.
+    # In that state the only safe choice is the company QuickBooks already has
+    # open on this Windows machine.  Ask QuickBooks for its actual local/UNC
+    # path and save that path for this copy; never assume another computer's
+    # drive letter.  If QuickBooks is not open yet, the dashboard still starts
+    # and its Status page lets the user select the open company afterwards.
+    if command == "serve" and config.mode == "quickbooks" and not config.company.file_path.strip():
+        try:
+            runtime.use_company()
+        except Exception:
+            pass
+
     serve(
         runtime,
         host=getattr(args, "host", None) or config.listen_host,

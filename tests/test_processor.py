@@ -3,6 +3,7 @@ import unittest
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from qb_agent.config import (
     AppConfig,
@@ -14,6 +15,7 @@ from qb_agent.importer import load_records
 from qb_agent.models import Operation
 from qb_agent.processor import Processor
 from qb_agent.quickbooks import DryRunQuickBooksGateway, QuickBooksError
+from qb_agent.runtime import Runtime
 from qb_agent.storage import Store
 
 CSV = (
@@ -180,6 +182,287 @@ class PolicyJobTests(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         self.assertIsNotNone(result.job_list_id)   # the policy job is still created
         self.assertIsNone(result.invoice_txn_id)   # but no invoice - CREATE_CUSTOMER stops there
+
+    def test_a_selected_location_is_reused_without_renaming_or_duplication(self):
+        location = "Dpeg Retail LLC LOC 110 HWY 6"
+        existing = self.gateway.create_customer(
+            replace(self.records[0], customer_name=location, company_name=location)
+        )
+        record = replace(
+            self.records[0],
+            customer_name="Dpeg Retail LLC",
+            company_name="Dpeg Retail LLC",
+            extra=(("qb_customer_target", location), ("qb_customer_id", existing.list_id)),
+        )
+
+        result = self.processor.process_many([record], Operation.CREATE_CUSTOMER)[0]
+
+        self.assertEqual(result.customer_list_id, existing.list_id)
+        self.assertIn(location.casefold(), self.gateway.customers)
+        self.assertNotIn("dpeg retail llc", self.gateway.customers)
+        self.assertIn(f"{location}:Commercial Property".casefold(), self.gateway.customers)
+
+    def test_update_cannot_rename_a_selected_location_customer(self):
+        location = "Dpeg Retail LLC LOC 110 HWY 6"
+        existing = self.gateway.create_customer(
+            replace(self.records[0], customer_name=location, company_name=location)
+        )
+        record = replace(
+            self.records[0],
+            customer_name="Dpeg Retail LLC",
+            company_name="Dpeg Retail LLC",
+            extra=(("qb_customer_target", location), ("qb_customer_id", existing.list_id)),
+        )
+
+        result = self.processor.process_many([record], Operation.UPDATE_CUSTOMER)[0]
+
+        self.assertEqual(result.status, "needs_review")
+        self.assertIn("was not changed", result.message)
+        self.assertIn(location.casefold(), self.gateway.customers)
+
+    def test_renewal_old_policy_identifies_the_parent_location(self):
+        location = "Dpeg Retail LLC LOC 110 HWY 6"
+        old = replace(
+            self.records[0], customer_name=location, company_name=location,
+            invoice_number="OLD-100", source_tab="Renewal",
+        )
+        customer = self.gateway.create_customer(old)
+        job = self.gateway.create_job(old, customer)
+        self.gateway.create_policy_invoice(old, job.list_id, "premium")
+        renewal = replace(
+            self.records[0], customer_name="Dpeg Retail LLC", company_name="Dpeg Retail LLC",
+            invoice_number="NEW-900", source_tab="Renewal",
+            extra=(("old_policy_number", "OLD-100"),),
+        )
+        runtime = Runtime(make_config())
+
+        matches, exact = runtime._old_policy_customers(self.gateway, renewal)
+
+        self.assertTrue(exact)
+        self.assertEqual([(item.list_id, item.full_name) for item in matches], [
+            (customer.list_id, location)
+        ])
+
+    def test_changed_old_policy_invalidates_an_automatic_mapping(self):
+        record = replace(
+            self.records[0], source_tab="Renewal",
+            extra=(
+                ("old_policy_number", "OLD-200"),
+                ("qb_customer_id", "CUSTOMER-1"),
+                ("qb_customer_action", "old_policy:old100"),
+            ),
+        )
+
+        self.assertEqual(record.mapped_customer_list_id, "")
+
+    def test_full_long_old_policy_is_searched_before_the_shortened_fallback(self):
+        location = "Serena Props LLC 14605"
+        old_number = "CFP4802613-2025"
+        old = replace(
+            self.records[0], customer_name=location, company_name=location,
+            invoice_number=old_number, source_tab="Renewal",
+        )
+        customer = self.gateway.create_customer(old)
+        job = self.gateway.create_job(old, customer)
+        self.gateway.create_policy_invoice(old, job.list_id, "premium")
+        renewal = replace(
+            self.records[0], customer_name="Serena Props LLC", company_name="Serena Props LLC",
+            invoice_number="10090", source_tab="Renewal",
+            extra=(("old_policy_number", old_number),),
+        )
+        runtime = Runtime(make_config())
+
+        matches, exact = runtime._old_policy_customers(self.gateway, renewal)
+
+        self.assertTrue(exact)
+        self.assertEqual([item.full_name for item in matches], [location])
+
+    def test_new_business_location_automatically_selects_matching_loc_customer(self):
+        record = replace(
+            self.records[0], customer_name="Dpeg Retail LLC", company_name="Dpeg Retail LLC",
+            source_tab="New Business",
+            extra=(("location", "Dpeg Retail LLC 1903 Hamilton Rd"),),
+        )
+        runtime = Runtime(make_config())
+        matched = runtime._dry_gateway.create_customer(
+            replace(record, customer_name="DPEG RETAIL LLC LOC 1903", company_name="DPEG RETAIL LLC LOC 1903")
+        )
+        runtime._dry_gateway.create_customer(
+            replace(record, customer_name="DPEG RETAIL LLC LOC 1904", company_name="DPEG RETAIL LLC LOC 1904")
+        )
+        runtime.records[record.source_id] = record
+
+        resolution = runtime.customer_resolutions([record.source_id])
+
+        self.assertEqual(resolution["ambiguous"], [])
+        self.assertEqual(resolution["automatic_choices"], [{
+            "source_id": record.source_id,
+            "action": "new_business_location",
+            "list_id": matched.list_id,
+        }])
+
+    def test_new_business_location_never_auto_selects_the_bare_customer(self):
+        record = replace(
+            self.records[0], customer_name="Dpeg Retail LLC", company_name="Dpeg Retail LLC",
+            source_tab="New Business",
+            extra=(("location", "Dpeg Retail LLC 1903 Hamilton Rd"),),
+        )
+        runtime = Runtime(make_config())
+        runtime._dry_gateway.create_customer(record)
+        runtime.records[record.source_id] = record
+
+        resolution = runtime.customer_resolutions([record.source_id])
+
+        self.assertEqual(resolution["automatic_choices"], [])
+        self.assertEqual(len(resolution["ambiguous"]), 1)
+
+    def test_dashboard_lob_reuses_unique_abbreviated_job_under_selected_customer(self):
+        location = "Serena Props LLC 14605"
+        existing = replace(
+            self.records[0], customer_name=location, company_name=location,
+            job_name="comm prpty", invoice_number="OLD-100", source_tab="Renewal",
+        )
+        customer = self.gateway.create_customer(existing)
+        old_job = self.gateway.create_job(existing, customer)
+        renewal = replace(
+            self.records[0], customer_name="Serena Props LLC", company_name="Serena Props LLC",
+            job_name="Commercial Property", invoice_number="NEW-100", source_tab="Renewal",
+            extra=(
+                ("old_policy_number", "OLD-100"),
+                ("qb_customer_id", customer.list_id),
+                ("qb_customer_target", location),
+                ("qb_customer_action", "old_policy:old100"),
+            ),
+        )
+
+        result = self.processor.process_many([renewal], Operation.CREATE_CUSTOMER)[0]
+
+        self.assertEqual(result.job_list_id, old_job.list_id)
+        self.assertIn("matches dashboard Line of Business", " ".join(result.steps))
+        self.assertNotIn(f"{location}:commercial property".casefold(), self.gateway.customers)
+
+    def test_general_liability_reuses_genl_liab_job(self):
+        location = "Example Customer LOC 1"
+        abbreviated = replace(
+            self.records[0], customer_name=location, company_name=location,
+            job_name="genl liab",
+        )
+        customer = self.gateway.create_customer(abbreviated)
+        old_job = self.gateway.create_job(abbreviated, customer)
+        record = replace(
+            self.records[0], customer_name="Example Customer", company_name="Example Customer",
+            job_name="General Liability",
+            extra=(("qb_customer_id", customer.list_id), ("qb_customer_target", location)),
+        )
+
+        result = self.processor.process_many([record], Operation.CREATE_CUSTOMER)[0]
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.job_list_id, old_job.list_id)
+
+    def test_business_lob_equivalents_reuse_the_existing_quickbooks_job(self):
+        cases = [
+            ("BOP", "Package"),
+            ("Umbrella", "Excess Liability"),
+            ("Umbrella - Comm", "Umbrella"),
+            ("Firms Arms", "Active Assualat"),
+            ("Shooting", "Firearms"),
+            ("EPLI", "Accedental Medical Coverage"),
+            ("Worker's Compensation", "Worker Comp"),
+            ("Surety Bond", "Bond"),
+            ("CGL", "Commercial General Liability"),
+            ("D&O", "Directors and Officers"),
+        ]
+        for index, (sheet_lob, quickbooks_lob) in enumerate(cases):
+            with self.subTest(sheet_lob=sheet_lob, quickbooks_lob=quickbooks_lob):
+                location = f"LOB Test {sheet_lob}"
+                existing = replace(
+                    self.records[0], customer_name=location, company_name=location,
+                    job_name=quickbooks_lob, source_id=f"LOB-EXISTING-{index}",
+                )
+                customer = self.gateway.create_customer(existing)
+                job = self.gateway.create_job(existing, customer)
+                record = replace(
+                    self.records[0], customer_name="LOB Test", company_name="LOB Test",
+                    job_name=sheet_lob, source_id=f"LOB-ROW-{index}",
+                    extra=(("qb_customer_id", customer.list_id), ("qb_customer_target", location)),
+                )
+
+                result = self.processor.process_many([record], Operation.CREATE_CUSTOMER)[0]
+
+                self.assertEqual(result.status, "completed")
+                self.assertEqual(result.job_list_id, job.list_id)
+                self.assertNotIn(
+                    f"{location}:{sheet_lob}".casefold(), self.gateway.customers
+                )
+
+    def test_live_batch_reopens_after_eight_rows_to_give_quickbooks_a_break(self):
+        config = make_config(
+            mode="quickbooks",
+            allow_writes=True,
+            company=CompanyConfig(display_name="Testing LLC", file_path="C:\\testing.qbw"),
+        )
+        processor = Processor(config, self.store, lambda: self.gateway)
+        records = [
+            replace(
+                self.records[0],
+                source_id=f"PACE-{index}",
+                invoice_number=f"PACE-{index}",
+                extra=(("qb_customer_action", "create"),),
+            )
+            for index in range(9)
+        ]
+
+        with patch("qb_agent.processor.sleep") as paused:
+            results = processor.process_many(records, Operation.CREATE_CUSTOMER)
+
+        self.assertEqual([item.status for item in results], ["completed"] * 9)
+        paused.assert_any_call(4.0)
+
+    def test_unrelated_old_policy_job_is_not_reused(self):
+        location = "Serena Props LLC 3504"
+        old = replace(
+            self.records[0], customer_name=location, company_name=location, job_name="package",
+        )
+        customer = self.gateway.create_customer(old)
+        package_job = self.gateway.create_job(old, customer)
+        record = replace(
+            self.records[0], customer_name="Serena Props LLC", company_name="Serena Props LLC",
+            job_name="Commercial Property",
+            extra=(
+                ("old_policy_number", "CMP4808373-2025"),
+                ("qb_customer_id", customer.list_id),
+                ("qb_customer_target", location),
+                ("qb_customer_action", "old_policy:cmp48083732025"),
+            ),
+        )
+
+        result = self.processor.process_many([record], Operation.CREATE_CUSTOMER)[0]
+
+        self.assertEqual(result.status, "completed")
+        self.assertNotEqual(result.job_list_id, package_job.list_id)
+        self.assertIn(f"{location}:commercial property".casefold(), self.gateway.customers)
+
+    def test_ambiguous_abbreviated_jobs_stop_for_review_without_creating(self):
+        location = "Example Customer LOC 2"
+        first = replace(
+            self.records[0], customer_name=location, company_name=location, job_name="comm prpty",
+        )
+        second = replace(first, job_name="comm property")
+        customer = self.gateway.create_customer(first)
+        self.gateway.create_job(first, customer)
+        self.gateway.create_job(second, customer)
+        record = replace(
+            self.records[0], customer_name="Example Customer", company_name="Example Customer",
+            job_name="Commercial Property",
+            extra=(("qb_customer_id", customer.list_id), ("qb_customer_target", location)),
+        )
+
+        result = self.processor.process_many([record], Operation.CREATE_CUSTOMER)[0]
+
+        self.assertEqual(result.status, "needs_review")
+        self.assertIn("More than one QuickBooks job matches", result.message)
+        self.assertNotIn(f"{location}:commercial property".casefold(), self.gateway.customers)
 
 
 class PremiumInvoiceTests(unittest.TestCase):
