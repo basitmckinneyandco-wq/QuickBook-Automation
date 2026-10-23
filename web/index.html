@@ -543,9 +543,12 @@
 
 <dialog id="customerDialog" aria-labelledby="customerTitle">
   <form method="dialog" id="customerForm">
-    <header class="edit-head">
+    <header class="edit-head customer-head">
+      <span class="customer-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.6-3.6"/></svg>
+      </span>
       <div class="edit-title">
-        <h2 id="customerTitle">Choose QuickBooks locations</h2>
+        <h2 id="customerTitle">Which customer is this?</h2>
         <p id="customerSubtitle"></p>
       </div>
       <button class="icon-btn" type="button" id="customerClose" aria-label="Close">
@@ -554,8 +557,7 @@
     </header>
 
     <p class="muted customer-hint">
-      Nothing was sent to QuickBooks. Pick the customer each policy belongs to —
-      or say it is new. Nothing is ever chosen for you here.
+      Nothing has been sent to QuickBooks yet.
     </p>
     <div class="customer-resolver" id="customerChoices"></div>
 

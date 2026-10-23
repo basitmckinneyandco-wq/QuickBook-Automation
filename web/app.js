@@ -3368,8 +3368,9 @@ function chooseQuickBooksCustomers(rows) {
   if (!rows.length) return Promise.resolve([]);
   const dialog = $("customerDialog");
   const choices = $("customerChoices");
-  $("customerSubtitle").textContent =
-    `${rows.length} polic${rows.length === 1 ? "y needs" : "ies need"} a location choice`;
+  $("customerSubtitle").textContent = rows.length === 1
+    ? "One policy is waiting on your answer"
+    : `${rows.length} policies are waiting on your answer`;
   $("customerNote").textContent = "Every row needs a choice before continuing.";
 
   choices.replaceChildren(...rows.map((row, position) => {
@@ -3400,8 +3401,11 @@ function chooseQuickBooksCustomers(rows) {
       ));
     } else {
       const empty = div("customer-empty");
-      empty.textContent = row.reason
-        || "Nothing in QuickBooks resembles this name. Creating it is the only option here.";
+      empty.append(
+        div("customer-empty-mark", "!"),
+        div("customer-empty-text", row.reason
+          || "Nothing in QuickBooks resembles this name, so creating it is the only option here.")
+      );
       options.append(empty);
     }
 
