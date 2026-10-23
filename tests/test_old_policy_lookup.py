@@ -2,7 +2,7 @@ import unittest
 from dataclasses import dataclass, field
 
 from qb_agent.quickbooks import CustomerEntity, InvoiceEntity
-from qb_agent.runtime import Runtime
+from qb_agent.runtime import Runtime, _names_agree
 
 
 @dataclass
@@ -108,6 +108,33 @@ class OldPolicyLookupTests(unittest.TestCase):
         )
         self.assertEqual([one.list_id for one in found], ["cust-1"])
         self.assertTrue(exact)
+
+
+class NameSanityCheckTests(unittest.TestCase):
+    """The expiring policy number decides the customer on its own, which is
+    right until the number is wrong. A number mistyped into the sheet, or one
+    a carrier has reused, points at a business with no connection to the row -
+    and the renewal is then billed to a stranger without anyone being asked."""
+
+    def test_the_same_business_written_differently_still_agrees(self):
+        for written in (
+            "ALBERT FOOD MART LLC",
+            "Albert Food Mart, LLC",
+            "ALBERT FOOD MART GA LLC",
+            "ALBERT FOOD MART LLC:Commercial Property",
+        ):
+            self.assertTrue(_names_agree("ALBERT FOOD MART LLC", written), written)
+
+    def test_an_unrelated_business_does_not_agree(self):
+        self.assertFalse(_names_agree("TETSING LLC 02", "Sky Sigman,LLC"))
+
+    def test_llc_alone_is_not_agreement(self):
+        """Nearly every customer carries LLC or Inc. Counting it as a match
+        would wave through exactly the case this check exists to catch."""
+        self.assertFalse(_names_agree("ACME LLC", "ZENITH LLC"))
+
+    def test_a_blank_name_agrees_with_nothing(self):
+        self.assertFalse(_names_agree("", "ALBERT FOOD MART LLC"))
 
 
 if __name__ == "__main__":

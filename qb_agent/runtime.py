@@ -69,6 +69,19 @@ def _location_words(value: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", value.casefold()))
 
 
+def _names_agree(sheet_name: str, quickbooks_name: str) -> bool:
+    """Whether two customer names look like the same business at all.
+
+    Used to sanity-check a customer found from the expiring policy number. The
+    number is normally proof enough, but a number mistyped in the sheet, or
+    reused by a carrier, lands on a stranger's account - and a renewal silently
+    billed to the wrong customer is far more costly than one extra question.
+    """
+    sheet = _location_words(sheet_name) - _LOCATION_FILLERS
+    found = _location_words(quickbooks_name.split(":", 1)[0]) - _LOCATION_FILLERS
+    return bool(sheet & found)
+
+
 # The four columns a dashboard writes, as the rows carry them.
 STATUS_FIELDS = ("qb_customer_job", "qb_premium", "qb_commission", "qb_fees")
 MAPPING_FIELDS = ("qb_customer_target", "qb_customer_id", "qb_customer_action")
@@ -922,7 +935,10 @@ class Runtime:
                     continue
                 else:
                     old_matches, old_is_exact = self._old_policy_customers(gateway, record)
-                    if len(old_matches) == 1 and old_is_exact:
+                    agrees = old_matches and _names_agree(
+                        record.quickbooks_customer_name, old_matches[0].full_name
+                    )
+                    if len(old_matches) == 1 and old_is_exact and agrees:
                         selected = old_matches[0]
                         automatic.append({
                             "source_id": record.source_id,
@@ -936,6 +952,10 @@ class Runtime:
                             "than one customer in QuickBooks, so this one cannot be worked out "
                             "on its own. Pick the right one."
                             if len(old_matches) > 1
+                            else f"The expiring policy {record.old_policy_number} belongs to "
+                            f"'{old_matches[0].full_name}' in QuickBooks, which is not the name "
+                            f"on this row. Check the expiring policy number before accepting it."
+                            if not agrees
                             else f"The expiring policy {record.old_policy_number} is in QuickBooks "
                             "but under a shortened number, so it could not be confirmed. Check "
                             "this is the right customer."
