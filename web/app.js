@@ -3300,6 +3300,29 @@ function setBusy(button, busyLabel) {
   button.innerHTML = `<span class="spinner-sm"></span>${busyLabel}`;
 }
 
+/* Looking a corporation name up in QuickBooks takes seconds, not milliseconds,
+   and it happens between the click and the picker appearing. Without a word
+   here the dashboard looks like it ignored the click. */
+function startLookup(button, count) {
+  const sweep = div("lookup-sweep");
+  sweep.innerHTML = `<span class="lookup-dot"></span><span class="lookup-text">Searching QuickBooks for ${
+    count === 1 ? "this customer" : `${count} customers`
+  }…</span>`;
+  document.body.append(sweep);
+  requestAnimationFrame(() => sweep.classList.add("in"));
+  const label = button ? button.textContent : "";
+  if (button) setBusy(button, "Searching…");
+  return () => {
+    sweep.classList.remove("in");
+    setTimeout(() => sweep.remove(), 260);
+    if (button) {
+      button.disabled = false;
+      button.classList.remove("is-busy");
+      button.textContent = button.dataset.label || label;
+    }
+  };
+}
+
 async function customerResolutions(ids) {
   const resolution = await api(
     "/api/customer-resolutions",
@@ -3349,18 +3372,40 @@ function chooseQuickBooksCustomers(rows) {
     `${rows.length} polic${rows.length === 1 ? "y needs" : "ies need"} a location choice`;
   $("customerNote").textContent = "Every row needs a choice before continuing.";
 
-  choices.replaceChildren(...rows.map((row) => {
+  choices.replaceChildren(...rows.map((row, position) => {
     const card = div("customer-row");
+
     const head = div("customer-row-head");
+    if (rows.length > 1) head.append(div("customer-step", String(position + 1)));
+    const naming = div("customer-naming");
     const title = document.createElement("strong");
     title.textContent = row.customer_name || "Unnamed customer";
-    const detail = document.createElement("span");
-    detail.textContent = [row.policy_number && `Policy ${row.policy_number}`, row.job_name]
-      .filter(Boolean).join(" · ") || row.reason;
-    head.append(title, detail);
+    const facts = div("customer-facts");
+    for (const fact of [row.policy_number && `Policy ${row.policy_number}`, row.job_name]) {
+      if (fact) facts.append(div("customer-chip", fact));
+    }
+    naming.append(title, facts);
+    head.append(naming);
 
     const options = div("customer-options");
-    for (const candidate of row.candidates || []) {
+    const candidates = row.candidates || [];
+    if (candidates.length) {
+      // Say what the list is before listing it: these are guesses, and the
+      // first one is not automatically the right one.
+      options.append(div(
+        "customer-legend",
+        candidates.length === 1
+          ? "One existing customer looks similar"
+          : `${candidates.length} existing customers look similar`
+      ));
+    } else {
+      const empty = div("customer-empty");
+      empty.textContent = row.reason
+        || "Nothing in QuickBooks resembles this name. Creating it is the only option here.";
+      options.append(empty);
+    }
+
+    for (const candidate of candidates) {
       const label = document.createElement("label");
       label.className = "customer-option";
       const radio = document.createElement("input");
@@ -3369,9 +3414,10 @@ function chooseQuickBooksCustomers(rows) {
       radio.value = candidate.list_id;
       radio.dataset.sourceId = row.source_id;
       radio.dataset.action = "use_existing";
-      label.append(radio, document.createTextNode(candidate.full_name));
+      label.append(radio, div("customer-option-name", candidate.full_name));
       options.append(label);
     }
+
     const create = document.createElement("label");
     create.className = "customer-option create-new";
     const radio = document.createElement("input");
@@ -3380,8 +3426,14 @@ function chooseQuickBooksCustomers(rows) {
     radio.value = "";
     radio.dataset.sourceId = row.source_id;
     radio.dataset.action = "create";
-    create.append(radio, document.createTextNode(`Create new customer “${row.customer_name}”`));
+    const createText = div("customer-option-name");
+    createText.append(
+      div("customer-create-label", "Create a new customer"),
+      div("customer-create-name", row.customer_name || "")
+    );
+    create.append(radio, createText);
     options.append(create);
+
     card.append(head, options);
     return card;
   }));
@@ -3390,11 +3442,19 @@ function chooseQuickBooksCustomers(rows) {
   const update = () => {
     const picked = choices.querySelectorAll('input[type="radio"]:checked').length;
     continueButton.disabled = picked !== rows.length;
+    $("customerProgressBar").style.width = `${(picked / rows.length) * 100}%`;
+    $("customerProgress").classList.toggle("complete", picked === rows.length);
     $("customerNote").textContent = picked === rows.length
       ? "Choices will be saved back to Google Sheets."
-      : `${rows.length - picked} location choice${rows.length - picked === 1 ? "" : "s"} remaining.`;
+      : `${rows.length - picked} of ${rows.length} still to choose.`;
+    // Settling a card should visibly settle it, or a long list gives no sense
+    // of progress at all.
+    for (const card of choices.querySelectorAll(".customer-row")) {
+      card.classList.toggle("chosen", !!card.querySelector('input[type="radio"]:checked'));
+    }
   };
   choices.addEventListener("change", update);
+  update();
 
   return new Promise((resolve) => {
     const cleanup = (answer) => {
@@ -3470,13 +3530,16 @@ function runQueued(task) {
 /** Send or update a single policy's customer, without touching the checkboxes.
     Clicking the row button is itself the confirmation - no popup on top of it. */
 async function actOnPolicy(sourceId, operation, button, label = "") {
+  const doneLooking = startLookup(button, 1);
   try {
     const resolution = await customerResolutions([sourceId]);
+    doneLooking();
     if ((resolution.ambiguous || []).length) {
       const ready = await chooseQuickBooksCustomers(resolution.ambiguous);
       if (!ready.length) return;
     }
   } catch (error) {
+    doneLooking();
     toast(error.message, true);
     return;
   }
@@ -3778,8 +3841,10 @@ async function processBatch(
   if (!ids.length) return;
   const batch = ids.slice(0, MAX_SELECTION);   // the server refuses more anyway
   if (!skipResolution) {
+    const doneLooking = startLookup($(buttonId), batch.length);
     try {
       const resolution = await customerResolutions(batch);
+      doneLooking();
       const resolved = resolution.resolved_ids || [];
       if (resolved.length) {
         await processBatch(operation, resolved, buttonId, {
@@ -3805,6 +3870,7 @@ async function processBatch(
         toast(`${resolution.unknown_ids.length} policies are no longer loaded. Refresh and try again.`, true);
       }
     } catch (error) {
+      doneLooking();
       toast(error.message, true);
     }
     return;

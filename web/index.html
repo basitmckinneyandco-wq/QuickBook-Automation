@@ -554,12 +554,15 @@
     </header>
 
     <p class="muted customer-hint">
-      These rows were not sent. Choose the existing QuickBooks customer for each
-      policy. Create new is never selected automatically.
+      Nothing was sent to QuickBooks. Pick the customer each policy belongs to —
+      or say it is new. Nothing is ever chosen for you here.
     </p>
     <div class="customer-resolver" id="customerChoices"></div>
 
-    <footer class="edit-foot">
+    <footer class="edit-foot customer-foot">
+      <div class="customer-progress" id="customerProgress">
+        <span class="customer-progress-bar" id="customerProgressBar"></span>
+      </div>
       <p class="muted" id="customerNote"></p>
       <span class="spacer"></span>
       <button class="btn ghost" type="button" id="customerCancel">Leave unprocessed</button>
