@@ -1068,7 +1068,7 @@ tbody tr.editing .row-btn { opacity: 1; }
 
 /* ═══ dialogs ════════════════════════════════════════════════════════════ */
 
-#editDialog, #invoiceDialog, #askDialog {
+#editDialog, #invoiceDialog, #askDialog, #customerDialog {
   border: 1px solid var(--line); border-radius: var(--r-lg); padding: 0;
   max-height: min(88vh, 900px);
   background: var(--surface); color: var(--text); box-shadow: var(--shadow);
@@ -1080,15 +1080,21 @@ tbody tr.editing .row-btn { opacity: 1; }
 
 #editDialog::backdrop,
 #invoiceDialog::backdrop,
-#askDialog::backdrop { background: rgba(10, 20, 16, .5); backdrop-filter: blur(2px); }
+#askDialog::backdrop,
+#customerDialog::backdrop { background: rgba(10, 20, 16, .5); backdrop-filter: blur(2px); }
 
 /* Both pop in rather than appearing, so the eye follows them. */
-#editDialog[open], #invoiceDialog[open], #askDialog[open] {
+#editDialog[open], #invoiceDialog[open], #askDialog[open], #customerDialog[open] {
   animation: dialog-in .24s cubic-bezier(.16, 1, .3, 1);
 }
-#editDialog[open]::backdrop, #invoiceDialog[open]::backdrop, #askDialog[open]::backdrop {
+#editDialog[open]::backdrop, #invoiceDialog[open]::backdrop,
+#askDialog[open]::backdrop, #customerDialog[open]::backdrop {
   animation: backdrop-in .24s ease;
 }
+
+/* A modal takes focus on open, and the browser then rings the whole box. */
+#editDialog:focus, #invoiceDialog:focus,
+#askDialog:focus, #customerDialog:focus { outline: none; }
 
 /* ── the app's own alert / confirm ── */
 #askForm { display: flex; flex-direction: column; }
@@ -1121,8 +1127,9 @@ tbody tr.editing .row-btn { opacity: 1; }
 @keyframes backdrop-in { from { opacity: 0; } to { opacity: 1; } }
 
 @media (prefers-reduced-motion: reduce) {
-  #editDialog[open], #invoiceDialog[open],
-  #editDialog[open]::backdrop, #invoiceDialog[open]::backdrop { animation: none; }
+  #editDialog[open], #invoiceDialog[open], #customerDialog[open],
+  #editDialog[open]::backdrop, #invoiceDialog[open]::backdrop,
+  #customerDialog[open]::backdrop { animation: none; }
 }
 
 #editForm, #invoiceForm { display: flex; flex-direction: column; max-height: inherit; }
@@ -1269,7 +1276,7 @@ td[data-key="__invoice"] .tag { display: block; margin-bottom: 3px; text-align: 
 .invoice-choice .muted { font-size: 12px; line-height: 1.45; }
 
 #customerForm { display: flex; flex-direction: column; max-height: inherit; }
-#customerDialog { width: min(620px, calc(100vw - 32px)); }
+#customerDialog { width: min(620px, calc(100% - 32px)); }
 
 /* The header reads as a question, with the magnifier saying where the answer
    was looked for. */
