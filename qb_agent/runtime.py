@@ -6,13 +6,22 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+import re
 from threading import Lock, Thread
 from time import monotonic, sleep
 from typing import Mapping
 
 from .config import AppConfig, database_for, load_config, save_company, save_data_source
 from .edits import EditError, apply, apply_all
-from .gsheets import Sheets, SheetsError, column_letter, status_columns
+from .gsheets import (
+    MAPPING_HEADERS,
+    Sheets,
+    SheetsError,
+    column_letter,
+    dashboard_header_row,
+    sheet_columns,
+    status_columns,
+)
 from .models import INVOICE_KINDS, Operation, WorkRecord
 from .processor import Processor
 from .quickbooks import (
@@ -48,8 +57,22 @@ LOOKUP_SECONDS = 300
 # instruction to forget what this machine thinks it did and judge the row again.
 _RESET = "__reset__"
 
+# These do not distinguish one insured location from another.  They are kept
+# out of the location match so "LOC 1903" and "1903 Hamilton Rd" still agree.
+_LOCATION_FILLERS = frozenset({
+    "loc", "location", "llc", "inc", "ltd", "co", "company", "corp",
+    "corporation", "the", "and", "of",
+})
+
+
+def _location_words(value: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
 # The four columns a dashboard writes, as the rows carry them.
 STATUS_FIELDS = ("qb_customer_job", "qb_premium", "qb_commission", "qb_fees")
+MAPPING_FIELDS = ("qb_customer_target", "qb_customer_id", "qb_customer_action")
+RESOLUTION_FIELDS = (*MAPPING_FIELDS, "old_policy_number", "location")
 
 # Words that record something having happened, and so may be written back into
 # the sheet on their own. "Pending" and "Needs review" are deliberately absent:
@@ -583,7 +606,7 @@ class Runtime:
                 grids[label] = grid
                 # Where this tab keeps its four status columns. Found per tab,
                 # because the two pipelines are a column out from each other.
-                self._status_columns[label] = status_columns(grid)
+                self._status_columns[label] = sheet_columns(grid)
             except SheetsError as exc:
                 if available is None:
                     available = sheets.tab_titles()
@@ -865,6 +888,331 @@ class Runtime:
         # either way, and the sheet is only how the other dashboard hears of it.
         self._publish_status(results)
         return results + unknown
+
+    def customer_resolutions(self, source_ids: list[str]) -> dict[str, object]:
+        """Classify rows, using a Renewal policy or New Business location first."""
+        if not source_ids:
+            raise ValueError("Select at least one policy first.")
+        if len(source_ids) > MAX_BATCH:
+            raise ValueError(f"A batch cannot contain more than {MAX_BATCH} policies.")
+
+        # The published feed intentionally carries only the verified accounting
+        # block. Read column R and saved IDs straight from the real sheet first.
+        self._refresh_resolution_fields(source_ids)
+        records = [self.records[source_id] for source_id in source_ids if source_id in self.records]
+        resolved: list[str] = []
+        ambiguous: list[dict[str, object]] = []
+        automatic: list[dict[str, str]] = []
+        factory = self._read_gateway if self.config.mode == "quickbooks" else self._gateway
+        candidate_cache: dict[str, list[object]] = {}
+
+        with factory() as gateway:
+            for record in records:
+                if record.mapped_customer_list_id:
+                    selected = gateway.find_customer_by_id(record.mapped_customer_list_id)
+                    if selected is not None:
+                        resolved.append(record.source_id)
+                        continue
+                    reason = "The previously selected QuickBooks customer no longer exists."
+                elif record.create_new_customer_selected:
+                    resolved.append(record.source_id)
+                    continue
+                else:
+                    old_matches, old_is_exact = self._old_policy_customers(gateway, record)
+                    if len(old_matches) == 1 and old_is_exact:
+                        selected = old_matches[0]
+                        automatic.append({
+                            "source_id": record.source_id,
+                            "action": "old_policy",
+                            "list_id": selected.list_id,
+                        })
+                        continue
+                    if old_matches:
+                        reason = (
+                            f"Old policy {record.old_policy_number} appears under more than one "
+                            "QuickBooks location. Choose the correct one."
+                            if len(old_matches) > 1
+                            else f"Old policy {record.old_policy_number} was shortened in QuickBooks "
+                            "and could not be verified from the invoice Memo. Confirm the location."
+                        )
+                        candidates = old_matches
+                        ambiguous.append({
+                            "source_id": record.source_id,
+                            "customer_name": record.customer_name,
+                            "policy_number": record.invoice_number,
+                            "old_policy_number": record.old_policy_number,
+                            "job_name": record.job_name,
+                            "reason": reason,
+                            "candidates": [
+                                {"list_id": item.list_id, "full_name": item.full_name}
+                                for item in candidates
+                            ],
+                        })
+                        continue
+                    location_candidates, location_matches = self._new_business_location_customers(
+                        gateway, record, candidate_cache
+                    )
+                    if len(location_matches) == 1:
+                        selected = location_matches[0]
+                        automatic.append({
+                            "source_id": record.source_id,
+                            "action": "new_business_location",
+                            "list_id": selected.list_id,
+                        })
+                        continue
+                    if record.location:
+                        reason = (
+                            f"Location '{record.location}' matches more than one QuickBooks customer. "
+                            "Choose the correct location."
+                            if location_matches else
+                            f"Location '{record.location}' did not identify one QuickBooks customer. "
+                            "Choose the existing location, or explicitly create a new customer."
+                        )
+                        ambiguous.append({
+                            "source_id": record.source_id,
+                            "customer_name": record.customer_name,
+                            "policy_number": record.invoice_number,
+                            "job_name": record.job_name,
+                            "reason": reason,
+                            "candidates": [
+                                {"list_id": item.list_id, "full_name": item.full_name}
+                                for item in location_candidates
+                            ],
+                        })
+                        continue
+                    exact = gateway.find_customer(record.quickbooks_customer_name)
+                    if exact is not None:
+                        resolved.append(record.source_id)
+                        continue
+                    reason = "Choose the existing location, or explicitly create a new customer."
+
+                key = record.quickbooks_customer_name.casefold()
+                if key not in candidate_cache:
+                    candidate_cache[key] = list(gateway.customer_candidates(record.quickbooks_customer_name))
+                candidates = candidate_cache[key]
+                ambiguous.append({
+                    "source_id": record.source_id,
+                    "customer_name": record.customer_name,
+                    "policy_number": record.invoice_number,
+                    "job_name": record.job_name,
+                    "reason": reason,
+                    "candidates": [
+                        {"list_id": item.list_id, "full_name": item.full_name}
+                        for item in candidates
+                    ],
+                })
+
+        unknown = [source_id for source_id in source_ids if source_id not in self.records]
+        return {
+            "resolved_ids": resolved,
+            "automatic_choices": automatic,
+            "ambiguous": ambiguous,
+            "unknown_ids": unknown,
+        }
+
+    def _new_business_location_customers(
+        self, gateway, record: WorkRecord, candidate_cache: dict[str, list[object]]
+    ) -> tuple[list[object], list[object]]:
+        """Return New Business candidates and only the ones safe to auto-select.
+
+        A sheet location can be longer than the old QuickBooks customer name
+        ("Dpeg Retail LLC 1903 Hamilton Rd" vs "DPEG RETAIL LLC LOC 1903").
+        Requiring the corporation words plus a distinctive location token
+        prevents the plain parent name from being mistaken for a location.
+        """
+        if "new business" not in record.source_tab.casefold() or not record.location:
+            return [], []
+        key = f"location:{record.location.casefold()}"
+        if key not in candidate_cache:
+            candidate_cache[key] = list(gateway.customer_candidates(record.location))
+        candidates = candidate_cache[key]
+        corporation = _location_words(record.customer_name) - _LOCATION_FILLERS
+        location = _location_words(record.location) - _LOCATION_FILLERS
+        required_corporation_words = min(2, len(corporation))
+        matches: list[object] = []
+        for candidate in candidates:
+            candidate_words = _location_words(candidate.full_name) - _LOCATION_FILLERS
+            distinguishing = candidate_words - corporation
+            if not distinguishing:
+                continue  # the bare corporation is never a location match
+            numbers = {word for word in distinguishing if word.isdigit()}
+            enough_company_words = len(corporation & candidate_words) >= required_corporation_words
+            if not enough_company_words:
+                continue
+            if numbers:
+                if numbers <= location:
+                    matches.append(candidate)
+                continue
+            if distinguishing <= location:
+                matches.append(candidate)
+        return candidates, matches
+
+    def _refresh_resolution_fields(self, source_ids: list[str]) -> None:
+        """Bring saved mappings and Renewal's old policy into the loaded rows."""
+        labels = {
+            self._tab_label(self.records[source_id].source_tab)
+            for source_id in source_ids if source_id in self.records
+        }
+        for label in labels:
+            index = self._row_lookup(label, force=True)
+            for source_id in source_ids:
+                record = self.records.get(source_id)
+                if record is None or self._tab_label(record.source_tab) != label:
+                    continue
+                found = index.get(_policy_key(record))
+                values = found[1] if found else {}
+                for field in RESOLUTION_FIELDS:
+                    if field in values:
+                        self._remember(source_id, field, values[field])
+
+    def _old_policy_customers(self, gateway, record: WorkRecord) -> tuple[list[object], bool]:
+        """Top-level customers owning invoices for a Renewal's old policy."""
+        if "renew" not in record.source_tab.casefold() or not record.old_policy_number:
+            return [], False
+        old = record.old_policy_number.strip()
+        # Historical invoices in this company keep the full policy number
+        # (for example CFP4802613-2025). Search that exact value first. The
+        # app's older 11-character form is only a fallback for invoices that
+        # were created by an older workflow and carry the full value in Memo.
+        invoices = gateway.find_invoices(old)
+        shortened_fallback = False
+        if not invoices and len(old) > 11:
+            invoices = gateway.find_invoices(old[:11])
+            shortened_fallback = bool(invoices)
+        parents: dict[str, object] = {}
+        exact = True
+        for invoice in invoices:
+            if not invoice.customer_list_id:
+                continue
+            if shortened_fallback and _policy_number_key(old) not in _policy_number_key(invoice.memo):
+                exact = False
+            target = gateway.find_customer_by_id(invoice.customer_list_id)
+            if target is None:
+                continue
+            parent = target
+            if target.parent_list_id:
+                parent = gateway.find_customer_by_id(target.parent_list_id) or target
+            elif ":" in target.full_name:
+                parent_name = target.full_name.split(":", 1)[0]
+                parent = gateway.find_customer(parent_name) or target
+            if ":" not in parent.full_name:
+                parents[parent.list_id] = parent
+        return list(parents.values()), exact
+
+    def save_customer_mappings(self, choices: list[dict[str, str]]) -> dict[str, object]:
+        """Verify dashboard choices, save them in memory, then write hidden sheet cells."""
+        if not choices:
+            raise ValueError("Choose at least one customer location.")
+
+        factory = self._read_gateway if self.config.mode == "quickbooks" else self._gateway
+        verified: list[tuple[WorkRecord, str, str, str]] = []
+        with factory() as gateway:
+            for choice in choices:
+                source_id = str(choice.get("source_id", "")).strip()
+                action = str(choice.get("action", "")).strip().casefold()
+                record = self.records.get(source_id)
+                if record is None:
+                    raise ValueError("One selected policy is no longer loaded. Refresh and try again.")
+                if action == "create":
+                    verified.append((record, "", "", "create"))
+                    continue
+                list_id = str(choice.get("list_id", "")).strip()
+                selected = gateway.find_customer_by_id(list_id) if list_id else None
+                if selected is None or ":" in selected.full_name:
+                    raise ValueError(f"The chosen customer for '{record.customer_name}' was not found.")
+                saved_action = (
+                    f"old_policy:{_policy_number_key(record.old_policy_number)}"
+                    if action == "old_policy"
+                    else "use_existing"
+                )
+                verified.append((record, selected.full_name, selected.list_id, saved_action))
+
+        sheet_saved = True
+        warning = ""
+        updates: list[tuple[str, str]] = []
+        try:
+            for record, target, list_id, action in verified:
+                label = self._tab_label(record.source_tab)
+                columns = self._ensure_mapping_columns(label)
+                row = self._sheet_row(record)
+                title = self.config.google_sheet.tab_titles.get(label, "")
+                if row < 1 or not title:
+                    raise SheetsError(
+                        f"The row for '{record.customer_name}' could not be identified in the sheet."
+                    )
+                values = {
+                    "qb_customer_target": target,
+                    "qb_customer_id": list_id,
+                    "qb_customer_action": action,
+                }
+                for field, value in values.items():
+                    updates.append((f"'{title}'!{column_letter(columns[field])}{row}", value))
+            if updates:
+                self._sheets().write(updates)
+        except SheetsError as exc:
+            sheet_saved = False
+            warning = str(exc)
+            self.sheet_write_error = warning
+        else:
+            self.sheet_write_error = ""
+
+        # Keep the current session usable even if Google is briefly unavailable.
+        # The warning is returned prominently; nothing is pretended to be saved there.
+        with self._lock:
+            for record, target, list_id, action in verified:
+                current = self.records.get(record.source_id)
+                if current is None:
+                    continue
+                extra = dict(current.extra)
+                extra.update({
+                    "qb_customer_target": target,
+                    "qb_customer_id": list_id,
+                    "qb_customer_action": action,
+                })
+                self.records[record.source_id] = replace(current, extra=tuple(extra.items()))
+        return {
+            "saved": [record.source_id for record, *_ in verified],
+            "sheet_saved": sheet_saved,
+            "warning": warning,
+            "records": self.records_payload(),
+        }
+
+    def _ensure_mapping_columns(self, label: str) -> dict[str, int]:
+        """Find or append the three hidden mapping columns for one tab."""
+        settings = self.config.google_sheet
+        if not (settings.enabled and settings.write_status):
+            raise SheetsError("Writing customer choices back to Google Sheets is switched off.")
+        title = settings.tab_titles.get(label, "")
+        if not title:
+            raise SheetsError("The policy's Google Sheet tab is not configured.")
+        grid = self._sheets().read(title)
+        columns = sheet_columns(grid)
+        missing = [field for field in MAPPING_FIELDS if field not in columns]
+        if missing:
+            header_row = dashboard_header_row(grid)
+            header = list(grid[header_row - 1]) if len(grid) >= header_row else []
+            next_column = len(header)
+            header_updates: list[tuple[str, str]] = []
+            added: list[int] = []
+            for field in missing:
+                columns[field] = next_column
+                added.append(next_column)
+                header_updates.append(
+                    (f"'{title}'!{column_letter(next_column)}{header_row}", MAPPING_HEADERS[field])
+                )
+                next_column += 1
+            # A values write cannot extend a Google Sheet grid. Grow this tab
+            # first by exactly the number of columns the mapping requires.
+            self._sheets().ensure_column_count(title, next_column)
+            self._sheets().write(header_updates)
+            try:
+                self._sheets().hide_columns(title, added)
+            except SheetsError as exc:
+                # The values are more important than presentation. Report the
+                # hide problem, but do not throw away a verified selection.
+                self.sheet_write_error = str(exc)
+        self._status_columns[label] = {**self._status_columns.get(label, {}), **columns}
+        return columns
 
     # ── telling the sheet what happened ─────────────────────────────────
 
@@ -1268,7 +1616,7 @@ class Runtime:
         except SheetsError as exc:
             self.sheet_write_error = str(exc)
             return {}
-        self._status_columns[label] = status_columns(grid)
+        self._status_columns[label] = sheet_columns(grid)
         try:
             # Every row, ready or not: this index is how a policy is found in
             # the sheet, and the published link's idea of which rows are
@@ -1287,7 +1635,10 @@ class Runtime:
             held = dict(entry.extra)
             seen[key] = (
                 entry.row_number,
-                {field: str(held.get(field, "")).strip() for field in STATUS_FIELDS},
+                {
+                    field: str(held.get(field, "")).strip()
+                    for field in (*STATUS_FIELDS, *RESOLUTION_FIELDS)
+                },
             )
         for key in ambiguous:
             seen.pop(key, None)      # two rows look the same; write to neither
@@ -1546,6 +1897,11 @@ def _policy_key(record: WorkRecord) -> tuple[str, str, str]:
         record.invoice_number.strip().casefold(),
         record.invoice_date.isoformat() if record.invoice_date else "",
     )
+
+
+def _policy_number_key(value: str) -> str:
+    """Compare policy numbers without formatting differences such as spaces or hyphens."""
+    return "".join(character for character in value.casefold() if character.isalnum())
 
 
 def _key(path: str) -> str:

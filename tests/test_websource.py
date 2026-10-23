@@ -59,6 +59,36 @@ class WebSourceTests(unittest.TestCase):
         self.assertEqual(record.job_full_name, "SUNSHINE STORES INC:Pollution Liability")
         self.assertEqual(record.invoice_number, "04-TOP-70841")
 
+    def test_renewal_keeps_old_and_new_policy_numbers_separate(self):
+        header = list(HEADER)
+        header.insert(4, "Policy Number")       # CRM block: expiring policy (R)
+        renewal_row = row(
+            "WORKING NAME", "SUNSHINE STORES INC", "Mid-Continent",
+            "Pollution Liability", "NEW-900", 209.30, "renewal", "2026-01-05T19:00:00.000Z",
+        )
+        renewal_row.insert(4, "OLD-100")
+
+        record = build_records("renewal", [header, renewal_row]).records[0]
+
+        self.assertEqual(record.old_policy_number, "OLD-100")
+        self.assertEqual(record.invoice_number, "NEW-900")
+
+    def test_new_business_reads_location_from_crm_column_j(self):
+        header = [
+            "CRM 0", "CRM 1", "CRM 2", "CRM 3", "CRM 4", "CRM 5", "Status",
+            "CRM 7", "CRM 8", "Location", "Policy Type", "EFF", "Corporation Name",
+            "Carrier", "Line of Business", "Policy No#", "Commision", "Comm Inv", "Status",
+        ]
+        source_row = [
+            "", "", "", "", "", "", "Bound", "", "",
+            "Dpeg Retail LLC 1903 Hamilton Rd", "new biz", "2026-01-05",
+            "Dpeg Retail LLC", "Carrier", "Commercial Property", "NEW-1903", 100, "commission", "Done",
+        ]
+
+        record = build_records("nb", [header, source_row]).records[0]
+
+        self.assertEqual(record.location, "Dpeg Retail LLC 1903 Hamilton Rd")
+
     def test_commission_becomes_the_line_amount_rounded(self):
         self.assertEqual(self.result.records[0].amount, Decimal("209.30"))
         self.assertEqual(self.result.records[0].rate, Decimal("0"))

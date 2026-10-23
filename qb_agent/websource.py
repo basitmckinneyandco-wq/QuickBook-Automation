@@ -45,6 +45,12 @@ FIELDS: dict[str, tuple[str, ...]] = {
     "job_name": ("line of business", "lob"),
     "item": ("carrier",),
     "invoice_number": ("policy no#", "policy no", "policy number"),
+    # Renewal keeps the expiring policy in the CRM block and the new policy in
+    # the verified block.  It is used only to locate the existing QB customer.
+    "old_policy_number": ("expiring policy number",),
+    # New Business keeps the insured location in the CRM block (column J).
+    # It is used only to locate an existing QuickBooks customer location.
+    "location": ("location", "location address", "insured location", "risk location", "physical location", "address"),
     "invoice_date": ("eff", "effective date"),
     "description": ("comm inv", "commission invoice"),
     "amount": ("commision", "commission"),
@@ -72,6 +78,9 @@ FIELDS: dict[str, tuple[str, ...]] = {
     "qb_premium": ("qb premium",),
     "qb_commission": ("qb commission",),
     "qb_fees": ("qb fees",),
+    "qb_customer_target": ("qb customer target",),
+    "qb_customer_id": ("qb customer id",),
+    "qb_customer_action": ("qb customer action",),
 }
 
 # Columns shown in the dashboard but never sent to QuickBooks.
@@ -83,6 +92,8 @@ DISPLAY_FIELDS = (
     # What another dashboard has already done with this row. Empty when the
     # sheet has no status columns, or when nobody has sent it yet.
     "qb_customer_job", "qb_premium", "qb_commission", "qb_fees",
+    "qb_customer_target", "qb_customer_id", "qb_customer_action",
+    "old_policy_number", "location",
 )
 
 # Only rows the agency has finished with belong in QuickBooks: the CRM column
@@ -197,6 +208,21 @@ def build_records(
     """
     header_index, header = _find_header(rows)
     columns, warnings = _map_columns(header)
+    # New Business's location is a CRM field to the left of the verified
+    # accounting block. Prefer its header, but accept the confirmed column-J
+    # layout when that one cell has an unhelpful/blank header. Do not apply this
+    # positional fallback to the headerless export: its column J is the LOB.
+    lowered = [name.strip().casefold() for name in header]
+    if tab_label(tab).casefold() == "new business":
+        location_headers = set(FIELDS["location"])
+        crm_locations = [
+            index for index, name in enumerate(lowered)
+            if name in location_headers and index < _block_start(lowered)
+        ]
+        if crm_locations:
+            columns["location"] = crm_locations[-1]
+        elif header_index >= 0 and _block_start(lowered) > 9 and len(header) > 9:
+            columns["location"] = 9
     # A feed that names its columns is matched by name. One that does not is
     # matched by position, but only after its shape has been recognised.
     pre_filtered = False
@@ -404,6 +430,15 @@ def _map_columns(header: Sequence[str]) -> tuple[dict[str, int], list[str]]:
     bound = [index for index, name in enumerate(lowered) if name == "status" and index < start]
     if bound:
         columns["bound_status"] = bound[0]
+    # Renewal column R is deliberately outside the verified accounting block.
+    # Keep it separate from invoice_number: the latter remains the new policy
+    # number from the right-hand verified block (currently column BJ).
+    old_policies = [
+        index for index, name in enumerate(lowered)
+        if name in ("policy number", "expiring policy number") and index < start
+    ]
+    if old_policies:
+        columns["old_policy_number"] = old_policies[-1]
     for field, aliases in FIELDS.items():
         for alias in aliases:
             matches = [

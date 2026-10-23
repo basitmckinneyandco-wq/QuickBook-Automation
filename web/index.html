@@ -541,6 +541,33 @@
   </form>
 </dialog>
 
+<dialog id="customerDialog" aria-labelledby="customerTitle">
+  <form method="dialog" id="customerForm">
+    <header class="edit-head">
+      <div class="edit-title">
+        <h2 id="customerTitle">Choose QuickBooks locations</h2>
+        <p id="customerSubtitle"></p>
+      </div>
+      <button class="icon-btn" type="button" id="customerClose" aria-label="Close">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </header>
+
+    <p class="muted customer-hint">
+      These rows were not sent. Choose the existing QuickBooks customer for each
+      policy. Create new is never selected automatically.
+    </p>
+    <div class="customer-resolver" id="customerChoices"></div>
+
+    <footer class="edit-foot">
+      <p class="muted" id="customerNote"></p>
+      <span class="spacer"></span>
+      <button class="btn ghost" type="button" id="customerCancel">Leave unprocessed</button>
+      <button class="btn primary" type="button" id="customerContinue" disabled>Save and continue</button>
+    </footer>
+  </form>
+</dialog>
+
 <dialog id="askDialog" aria-labelledby="askTitle">
   <form method="dialog" id="askForm">
     <header class="ask-head">

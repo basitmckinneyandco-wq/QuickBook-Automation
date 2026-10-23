@@ -105,6 +105,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json(self._edit_many())
             elif self.path == "/api/process":
                 self._json(self._process())
+            elif self.path == "/api/customer-resolutions":
+                self._json(self._customer_resolutions())
+            elif self.path == "/api/customer-mappings":
+                self._json(self._customer_mappings())
             elif self.path == "/api/company":
                 self._json(self._company())
             elif self.path == "/api/source":
@@ -228,6 +232,25 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             "records": self.server.runtime.records_payload(),
             "activity": self.server.runtime.activity(),
         }
+
+    def _customer_resolutions(self) -> dict[str, object]:
+        payload = self._read_json()
+        ids = payload.get("ids", [])
+        if not isinstance(ids, list) or not ids:
+            raise ValueError("Select at least one policy first.")
+        return self.server.runtime.customer_resolutions([str(value) for value in ids])
+
+    def _customer_mappings(self) -> dict[str, object]:
+        payload = self._read_json()
+        choices = payload.get("choices", [])
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("Choose at least one customer location.")
+        cleaned: list[dict[str, str]] = []
+        for choice in choices:
+            if not isinstance(choice, dict):
+                raise ValueError("A customer choice is invalid.")
+            cleaned.append({str(key): str(value) for key, value in choice.items()})
+        return self.server.runtime.save_customer_mappings(cleaned)
 
     # --- plumbing ------------------------------------------------------------
 
