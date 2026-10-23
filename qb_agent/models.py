@@ -167,6 +167,21 @@ class WorkRecord:
         return dict(self.extra).get(key, "").strip()
 
     @property
+    def billing(self) -> str:
+        """How the policy is billed: agency billing, or direct by the carrier."""
+        return self._extra("billing")
+
+    @property
+    def direct_billed(self) -> bool:
+        """The carrier bills the insured, so the agency raises no premium.
+
+        Written several ways in the sheet - "Direct Billing", "Direct Bill",
+        "direct" - so the word is looked for rather than the whole phrase
+        matched.
+        """
+        return "direct" in self.billing.casefold()
+
+    @property
     def mapped_customer_list_id(self) -> str:
         """The exact QuickBooks destination selected in the dashboard."""
         list_id = self._extra("qb_customer_id")
@@ -332,14 +347,20 @@ class WorkRecord:
         be fixed - there is simply nothing to raise, and calling it "needs
         review" sends somebody looking for a mistake that was never made.
 
-        The premium always applies: every policy has one, and a net due of zero
-        really is something to look into.
+        On a direct-billed policy the carrier bills the insured, so the agency
+        raises no premium invoice. That is the office's rule rather than
+        something the figures show, so it is only the starting answer: marking
+        the premium "Need it after all" overrides this, and that mark is what
+        the dashboard reads first.
+
+        Otherwise the premium always applies: every policy has one, and a net
+        due of zero really is something to look into.
         """
         if kind == "commission":
             return self.commission_amount > 0
         if kind == "fees":
             return self.fees_amount > 0
-        return True
+        return not self.direct_billed
 
     def premium_reasons(self) -> list[str]:
         """Everything that stops a premium invoice being raised."""

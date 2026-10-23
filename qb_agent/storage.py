@@ -309,6 +309,21 @@ class Store:
                     "AND kind=? AND status='not_needed'",
                     (source_id, mode, kind),
                 )
+                # Clearing the mark is not enough where the row would answer
+                # "not needed" on its own - a direct-billed policy raises no
+                # premium by default - because then there is nothing to clear
+                # and the button appears to do nothing. Wanting it is written
+                # down in its own right, which outranks that default. Anything
+                # else already recorded, a failure above all, is left alone.
+                if connection.execute(
+                    "SELECT 1 FROM invoice_state WHERE source_id=? AND mode=? AND kind=?",
+                    (source_id, mode, kind),
+                ).fetchone() is None:
+                    connection.execute(
+                        "INSERT INTO invoice_state (source_id, mode, kind, status, updated_at)"
+                        " VALUES (?, ?, ?, 'ready', ?)",
+                        (source_id, mode, kind, _now()),
+                    )
                 return
             existing = connection.execute(
                 "SELECT status, txn_id FROM invoice_state "

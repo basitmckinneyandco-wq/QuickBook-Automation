@@ -401,16 +401,30 @@ class Processor:
     def _marked_not_needed(
         self, records: list[WorkRecord], operation: Operation
     ) -> set[str]:
-        """Which of these rows have this kind of invoice marked as not wanted."""
+        """Which of these rows have this kind of invoice marked as not wanted.
+
+        Either because somebody said so, or because the row answers it itself:
+        a direct-billed policy raises no premium, the carrier having billed
+        the insured. Asked for by name - "Need it after all" - it is wanted
+        again, and that mark is what decides.
+        """
         kind = operation.invoice_kind
         if not kind:
             return set()
         held = self.store.invoice_states([r.source_id for r in records], self.config.mode)
-        return {
-            source_id
-            for source_id, kinds in held.items()
-            if (state := kinds.get(kind)) is not None and state.status == "not_needed"
-        }
+
+        def skip(record: WorkRecord) -> bool:
+            state = held.get(record.source_id, {}).get(kind)
+            if state is not None and state.status:
+                return state.status == "not_needed"
+            # Only the direct-billing rule is applied here. A commission or
+            # fees row with nothing to bill is left to fail its own checks and
+            # say why, which is what somebody asking for it by name needs to
+            # hear - silently calling it "not needed" would answer a question
+            # they did not ask.
+            return kind == "premium" and record.direct_billed
+
+        return {record.source_id for record in records if skip(record)}
 
     def _run_batch(
         self,
