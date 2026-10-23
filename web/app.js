@@ -22,6 +22,7 @@ const state = {
   // result can be read before the row leaves: source_id -> "hold" | "leaving".
   lingering: new Map(),
   source: "all",
+  billing: "all",
   dateRange: "all",
   dateFrom: "",
   dateTo: "",
@@ -1418,6 +1419,14 @@ function visibleRecords() {
       return false;
     }
     if (state.source !== "all" && record.source_tab !== state.source) return false;
+    // The sheet writes this several ways - "Direct Billing", "Direct Bill",
+    // one row with a stray capital - so the word decides, not the phrase.
+    // Anything that is not direct counts as agency, including a blank, which
+    // is how the office treats it.
+    if (state.billing !== "all") {
+      const direct = /direct/i.test(record.billing || "");
+      if (direct !== (state.billing === "direct")) return false;
+    }
     if (span) {
       // Rows with no effective date cannot satisfy a date window.
       if (!record.invoice_date) return false;
@@ -4067,6 +4076,10 @@ function wire() {
     renderTable();
     renderSelection();
   };
+  $("billingFilter").addEventListener("change", (event) => {
+    state.billing = event.target.value;
+    reFilter();
+  });
   $("sourceFilter").addEventListener("change", (event) => {
     state.source = event.target.value;
     reFilter();
