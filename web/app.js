@@ -1424,7 +1424,10 @@ function visibleRecords() {
     // Anything that is not direct counts as agency, including a blank, which
     // is how the office treats it.
     if (state.billing !== "all") {
-      const direct = /direct/i.test(record.billing || "");
+      // Billing is a sheet column, so it lives in record.extra rather than on
+      // the record itself - reading it off the record gives undefined for
+      // every row, and the filter then matches nothing at all.
+      const direct = /direct/i.test((record.extra || {}).billing || "");
       if (direct !== (state.billing === "direct")) return false;
     }
     if (span) {
