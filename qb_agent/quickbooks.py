@@ -56,10 +56,52 @@ def _search_token(value: str) -> str:
     return words[0] if words else ""
 
 
+# What follows a company's name rather than being part of it. A name is cut
+# at the first of these, so everything a business trades as sits under one
+# heading: "Dpeg Retail LLC 1903 Hamilton Rd" belongs to "Dpeg Retail LLC".
+_ENTITY_SUFFIXES = {
+    "llc", "lllc", "pllc", "inc", "incorporated", "corp", "corporation",
+    "co", "company", "lp", "llp", "ltd", "limited", "pc", "plc",
+}
+
+
+def _base_company_name(value: str) -> str:
+    """The company name without whatever distinguishes one of its locations.
+
+    Blank when the name carries no LLC, Inc or the like: there is then no
+    telling where the company ends and the location begins, and a guess would
+    sweep in every business whose name happens to start the same way.
+    """
+    words = _normal_name(value).split()
+    for position, word in enumerate(words):
+        # Never the first word: a business actually called "Co-op Market"
+        # would otherwise reduce to "co" and match half the customer list.
+        if position >= 1 and word in _ENTITY_SUFFIXES:
+            return " ".join(words[: position + 1])
+    return ""
+
+
+def _same_company(base: str, full_name: str) -> bool:
+    """Whether a QuickBooks customer belongs to that company."""
+    if not base:
+        return False
+    candidate = _normal_name(full_name)
+    return candidate == base or candidate.startswith(base + " ")
+
+
 def _rank_customers(name: str, customers: list["CustomerEntity"]) -> list["CustomerEntity"]:
-    """Put likely location variants first and discard unrelated results."""
+    """Every account under this company first, then anything else that looks close.
+
+    A location is written differently in the sheet and in QuickBooks - "Dpeg
+    Retail LLC 1903 Hamilton Rd" against "DPEG RETAIL LLC LOC 1903" - and
+    resemblance alone scores those two no higher than a coincidence. So
+    sharing the company name is reason enough to be offered, whatever the
+    rest of the name says, and the plain company is offered beside its
+    locations rather than being judged too short to count.
+    """
     wanted = _normal_name(name)
     wanted_words = set(wanted.split())
+    base = _base_company_name(name)
 
     def score(entity: "CustomerEntity") -> float:
         candidate = _normal_name(entity.full_name)
@@ -68,8 +110,14 @@ def _rank_customers(name: str, customers: list["CustomerEntity"]) -> list["Custo
         similarity = SequenceMatcher(None, wanted, candidate).ratio()
         return contained * 2 + overlap + similarity
 
-    ranked = sorted(customers, key=lambda entity: (-score(entity), entity.full_name.casefold()))
-    return [entity for entity in ranked if score(entity) >= 1.15][:25]
+    def household(entity: "CustomerEntity") -> bool:
+        return _same_company(base, entity.full_name)
+
+    ranked = sorted(
+        customers,
+        key=lambda entity: (not household(entity), -score(entity), entity.full_name.casefold()),
+    )
+    return [one for one in ranked if household(one) or score(one) >= 1.15][:25]
 
 
 def fees_memo(policy_number: str) -> str:

@@ -1051,9 +1051,16 @@ class Runtime:
         """
         if "new business" not in record.source_tab.casefold() or not record.location:
             return [], []
-        key = f"location:{record.location.casefold()}"
+        # Look the company up, not the address. Searching QuickBooks for
+        # "2406 East Expressway 83" asks it for customers with 2406 in their
+        # name, which finds nothing and leaves the picker with no accounts to
+        # offer - when every one of that company's locations was there to be
+        # found under its own name.
+        key = f"company:{record.quickbooks_customer_name.casefold()}"
         if key not in candidate_cache:
-            candidate_cache[key] = list(gateway.customer_candidates(record.location))
+            candidate_cache[key] = list(
+                gateway.customer_candidates(record.quickbooks_customer_name)
+            )
         candidates = candidate_cache[key]
         corporation = _location_words(record.customer_name) - _LOCATION_FILLERS
         location = _location_words(record.location) - _LOCATION_FILLERS
