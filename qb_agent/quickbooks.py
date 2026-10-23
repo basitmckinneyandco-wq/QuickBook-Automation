@@ -164,7 +164,12 @@ class QuickBooksGateway(Protocol):
     def find_invoice(self, ref_number: str) -> InvoiceEntity | None: ...
     def create_invoice(self, record: WorkRecord, customer_list_id: str) -> InvoiceEntity: ...
     def find_policy_invoice(
-        self, ref_number: str, kind: str, job_list_id: str = "", policy_number: str = ""
+        self,
+        ref_number: str,
+        kind: str,
+        job_list_id: str = "",
+        policy_number: str = "",
+        policy_year: int = 0,
     ) -> InvoiceEntity | None: ...
     def create_policy_invoice(
         self, record: WorkRecord, job_list_id: str, kind: str
@@ -516,12 +521,23 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         )
 
     def find_policy_invoice(
-        self, ref_number: str, kind: str, job_list_id: str = "", policy_number: str = ""
+        self,
+        ref_number: str,
+        kind: str,
+        job_list_id: str = "",
+        policy_number: str = "",
+        policy_year: int = 0,
     ) -> InvoiceEntity | None:
         """The invoice of this kind for this policy, if one already exists.
 
         A policy's premium and commission invoices share its number, so the
         A/R account is what tells them apart.
+
+        Some accounts keep one policy number from year to year, so the number
+        alone finds last year's invoice as readily as this year's - and the
+        renewal was reopening 2025's invoice and overwriting it rather than
+        raising 2026's. The effective date settles it: an invoice counts as
+        this policy's only if it falls in the same year.
 
         Fees invoices are all numbered "Fee", so the number says nothing about
         which policy one belongs to. They are looked for on the policy's job
@@ -530,6 +546,19 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         its number, so that is tried as well - and updating it renames it.
         """
         wanted = _fold(self.kind_config(kind).ar_account)
+
+        def same_year(match: dict) -> bool:
+            """Whether this invoice belongs to the year being sent.
+
+            Without a year to compare against - a row with no effective date -
+            every invoice qualifies, which is what happened before the date
+            was asked for at all.
+            """
+            if not policy_year:
+                return True
+            found = _invoice_year(match.get("txn_date", ""))
+            return found == 0 or found == policy_year
+
         if kind == "fees" and job_list_id:
             xml = self.transport.request(self.builder.invoice_query_for_job(job_list_id))
             self._raise_on_error(xml)
@@ -541,13 +570,15 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
                     continue
                 if _fold(match["memo"]) != memo:
                     continue
+                if not same_year(match):
+                    continue
                 return _entity(match, ref_number)
         xml = self.transport.request(self.builder.invoice_query(ref_number))
         self._raise_on_error(xml)
         candidates = [
             match
             for match in parse_invoice_matches(xml)
-            if not wanted or _fold(match["ar_account"]) == wanted
+            if (not wanted or _fold(match["ar_account"]) == wanted) and same_year(match)
         ]
         if not candidates:
             return None
@@ -1009,10 +1040,13 @@ class DryRunQuickBooksGateway(AbstractContextManager["DryRunQuickBooksGateway"])
         return self.invoices.get(ref_number.casefold())
 
     def find_invoices(self, ref_number: str) -> list[InvoiceEntity]:
+        """Every invoice under one number, whatever year or kind it was filed
+        under - this is how a renewal finds the customer it was billed to last
+        time, so the year must not narrow it here."""
         wanted = ref_number.casefold()
         return [
             invoice for key, invoice in self.invoices.items()
-            if key == wanted or ("|" in key and key.split("|", 1)[1] == wanted)
+            if key.rsplit("|", 1)[-1] == wanted
         ]
 
     def create_invoice(self, record: WorkRecord, customer_list_id: str) -> InvoiceEntity:
@@ -1023,9 +1057,16 @@ class DryRunQuickBooksGateway(AbstractContextManager["DryRunQuickBooksGateway"])
         return entity
 
     def find_policy_invoice(
-        self, ref_number: str, kind: str, job_list_id: str = "", policy_number: str = ""
+        self,
+        ref_number: str,
+        kind: str,
+        job_list_id: str = "",
+        policy_number: str = "",
+        policy_year: int = 0,
     ) -> InvoiceEntity | None:
-        return self.invoices.get(f"{kind}|{ref_number.casefold()}")
+        # Keyed by year as well, so a dry run shows the same thing a real send
+        # would do: a renewal under last year's number raises its own invoice.
+        return self.invoices.get(f"{kind}|{policy_year}|{ref_number.casefold()}")
 
     def create_policy_invoice(
         self, record: WorkRecord, job_list_id: str, kind: str
@@ -1037,7 +1078,7 @@ class DryRunQuickBooksGateway(AbstractContextManager["DryRunQuickBooksGateway"])
             "1",
             "LINE-1",
         )
-        self.invoices[f"{kind}|{record.invoice_number.casefold()}"] = entity
+        self.invoices[_policy_key(record, kind)] = entity
         return entity, []
 
     def update_policy_invoice(
@@ -1046,7 +1087,7 @@ class DryRunQuickBooksGateway(AbstractContextManager["DryRunQuickBooksGateway"])
         entity = InvoiceEntity(
             existing.txn_id, record.invoice_number, job_list_id, "2", existing.line_id
         )
-        self.invoices[f"{kind}|{record.invoice_number.casefold()}"] = entity
+        self.invoices[_policy_key(record, kind)] = entity
         return entity, []
 
     def note_full_policy_number(self, record: WorkRecord, job: CustomerEntity) -> str:
@@ -1194,6 +1235,29 @@ def sdk_registered() -> bool:
 
 def _fold(value: str | None) -> str:
     return (value or "").strip().casefold()
+
+
+def _policy_key(record: WorkRecord, kind: str) -> str:
+    """How a dry run files one invoice: kind, year and policy number.
+
+    The year is part of it because a policy number on its own is not unique
+    across renewals, which is exactly the mistake this is here to reproduce
+    faithfully rather than hide.
+    """
+    year = record.invoice_date.year if record.invoice_date else 0
+    return f"{kind}|{year}|{record.invoice_number.casefold()}"
+
+
+def _invoice_year(txn_date: str) -> int:
+    """The year on a QuickBooks invoice date, or 0 when it cannot be read.
+
+    Zero means "do not judge on this": an invoice whose date is missing or
+    malformed is left to the policy number alone, as it was before the date
+    was looked at. Guessing a year would be worse than not having one, since
+    a wrong guess either overwrites last year's invoice or raises a duplicate.
+    """
+    text = (txn_date or "").strip()[:4]
+    return int(text) if text.isdigit() else 0
 
 
 def _texts(xml: str, node_tag: str, child_tag: str) -> list[str]:

@@ -704,6 +704,12 @@ class Processor:
         A policy's premium and commission invoices share its policy number, so
         the lookup is by kind - otherwise one would be mistaken for the other
         and updated in its place.
+
+        The effective date goes with it. Some accounts keep one policy number
+        across renewals, and by the number alone last year's invoice answers
+        to this year's row: a 2026 renewal was reopening the 2025 invoice and
+        overwriting it. An invoice has to fall in the year being sent before
+        it counts as this policy's.
         """
         spec = _INVOICE_DETAIL[kind]
         existing = gateway.find_policy_invoice(
@@ -711,6 +717,7 @@ class Processor:
             kind,
             job_list_id=target.list_id,
             policy_number=record.invoice_number,
+            policy_year=record.invoice_date.year if record.invoice_date else 0,
         )
         if existing is not None and existing.customer_list_id == target.list_id:
             # Sending again is how an edited row is corrected, so the existing

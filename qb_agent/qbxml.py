@@ -418,6 +418,10 @@ def parse_invoice_matches(xml: str) -> list[dict[str, str]]:
         {
             "txn_id": ret.findtext("TxnID", ""),
             "ref_number": ret.findtext("RefNumber", ""),
+            # The policy year. Some accounts carry one policy number from year
+            # to year, so without this the renewal reopens last year's invoice
+            # instead of raising this year's.
+            "txn_date": ret.findtext("TxnDate", ""),
             "edit_sequence": ret.findtext("EditSequence", ""),
             "customer_list_id": ret.findtext("CustomerRef/ListID", ""),
             "ar_account": ret.findtext("ARAccountRef/FullName", ""),
