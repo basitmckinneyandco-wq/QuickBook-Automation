@@ -1357,6 +1357,7 @@ class Runtime:
             return {"written": 0, "reason": "Writing to the sheet is switched off."}
 
         with self._lock:
+            snapshot_at = monotonic()
             states = self.store.states_for(list(self.records), self.config.mode)
             invoices = self.store.invoice_states(list(self.records), self.config.mode)
             rows = list(self.records.values())
@@ -1416,6 +1417,19 @@ class Runtime:
                 noted.append((record.source_id, column, word))
             if len(updates) >= limit:
                 break
+
+        # Finding each row's cell can take seconds, and a send can finish in
+        # that time and write "Created" itself. What was worked out above is
+        # then older than the sheet, and writing it would put the old word -
+        # usually Pending - over the new one. The next read takes that for
+        # somebody resetting the row, and the record of the invoice is wiped.
+        # A cell written since the snapshot is left to whoever wrote it.
+        fresh = [
+            (update, note) for update, note in zip(updates, noted)
+            if self._written_at.get((note[0], note[1]), 0.0) < snapshot_at
+        ]
+        updates = [update for update, _ in fresh]
+        noted = [note for _, note in fresh]
 
         written = 0
         try:
@@ -1697,6 +1711,16 @@ class Runtime:
             if kind in set(INVOICE_KINDS.values()):
                 if self.store.forget_invoice(source_id, self.config.mode, kind):
                     cleared += 1
+                    # Said aloud: this deletes the record of an invoice that
+                    # may really exist in QuickBooks, and it is only ever right
+                    # when a person typed Pending. Anything else is a bug, and
+                    # without a trace there is no telling which.
+                    label = self.records[source_id].customer_name
+                    print(
+                        f"Reset: the sheet's {kind} cell for '{label}' changed to "
+                        "Pending, so the saved invoice record was cleared.",
+                        flush=True,
+                    )
         return cleared
 
     def refresh_statuses(self) -> int:
@@ -1773,6 +1797,7 @@ class Runtime:
         if not (settings.enabled and settings.write_status):
             return 0
         with self._lock:
+            snapshot_at = monotonic()
             states = self.store.states_for(list(self.records), self.config.mode)
             invoices = self.store.invoice_states(list(self.records), self.config.mode)
             rows = list(self.records.values())
@@ -1799,6 +1824,14 @@ class Runtime:
                     continue            # two rows look alike; sync_sheet reports it
                 updates.append((cell, word))
                 noted.append((record.source_id, column, word))
+        # Same as sync_sheet: a cell written since the snapshot is not ours to
+        # overwrite with what was true before that write.
+        fresh = [
+            (update, note) for update, note in zip(updates, noted)
+            if self._written_at.get((note[0], note[1]), 0.0) < snapshot_at
+        ]
+        updates = [update for update, _ in fresh]
+        noted = [note for _, note in fresh]
         if not updates:
             return 0
         try:
