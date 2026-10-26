@@ -3692,15 +3692,21 @@ function ask({ title, sub = "", detail = "", note = "", ok = "OK", cancel = "", 
     const finish = (answer) => {
       okButton.removeEventListener("click", yes);
       cancelButton.removeEventListener("click", no);
-      dialog.removeEventListener("close", no);
+      dialog.removeEventListener("close", closed);
       if (dialog.open) dialog.close();
       resolve(answer);
     };
     const yes = () => finish(true);
     const no = () => finish(false);
+    // The browser reports a closed dialog a moment after it closes. When one
+    // question follows another, that late report from the first arrives while
+    // the second is already open, and used to be taken as the second being
+    // dismissed - so it flashed up and answered itself "no", and nothing was
+    // sent. A dialog that is open has not been dismissed.
+    const closed = () => { if (!dialog.open) finish(false); };
     okButton.addEventListener("click", yes);
     cancelButton.addEventListener("click", no);
-    dialog.addEventListener("close", no);
+    dialog.addEventListener("close", closed);
     dialog.showModal();
     (cancel ? cancelButton : okButton).focus();
   });
