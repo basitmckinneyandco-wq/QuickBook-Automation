@@ -1,0 +1,71 @@
+HOW THE APP WORKS - in plain words
+==================================
+
+The app reads policies from the Google Sheet, and creates the customer, the
+job and the invoices in QuickBooks. It then writes what happened back into the
+sheet, so every computer sees the same thing.
+
+QuickBooks must be open with the right company, on the Home screen. Close the
+Customer Center first - the app stops and asks if it is open.
+
+
+WHICH CUSTOMER?   (it stops at the first answer it finds)
+-----------------------------------------------------------
+ 1. A customer ID is already in the sheet          -> goes straight there.
+ 2. You chose "create new" before                  -> creates it.
+ 3. Renewal with an expiring policy number         -> finds who was billed for
+    that number last year. If that name shares no real word with the name on
+    the row, it asks you instead (a mistyped number would bill a stranger).
+ 4. New Business with a location                   -> looks at that company's
+    locations and matches the location.
+ 5. The exact name is already in QuickBooks        -> uses it.
+ 6. Similar names exist                            -> shows you a list to pick.
+ 7. Nothing like it                                -> creates it, no question.
+
+WHICH JOB (line of business)?
+-----------------------------
+ 1. A job ID is already in the sheet               -> goes straight there.
+ 2. A job with exactly that name exists            -> uses it.
+ 3. A job matches once spellings are cleaned up    -> uses it
+    (prpty / propty / property are one job; the table was read from the real
+    company file).
+ 4. Two jobs match                                 -> stops and asks.
+ 5. Nothing                                        -> creates the job.
+
+WHICH INVOICE?   (premium, commission and fees are handled separately)
+---------------------------------------------------------------------
+Looked up under the job by: same policy number + same kind + same YEAR of the
+effective date.
+ - Found      -> updated (this is how an edited row is corrected).
+ - Not found  -> a new invoice is created.
+The year stops a 2026 renewal from overwriting the 2025 invoice when the
+carrier reuses a policy number.
+
+Direct Billing rows: the premium invoice is "Not needed" by default (the
+carrier bills the insured). "Need it after all" turns it back on.
+
+
+WHAT IT WRITES BACK TO THE SHEET
+--------------------------------
+Status words: Created / Failed / Not needed / Pending / Needs review.
+Four hidden columns the app adds for itself - do not rename or fill them:
+   qb customer target, qb customer id, qb customer action,
+   qb job target, qb job id
+They are written AFTER QuickBooks has done the work, so even a customer that
+was created new gets its real ID recorded. Next time the row goes straight
+there by ID, on any computer, whatever anyone renames in QuickBooks.
+
+Typing "Pending" over a status cell tells the app to forget that step and send
+it again.
+
+
+IF SOMETHING LOOKS WRONG
+------------------------
+ - Click did nothing: QuickBooks probably has a window open. The app now says
+   "Nothing was sent" when it stops.
+ - Status slips back to Pending: the black window prints a line starting
+   "Reset:". Copy that line when asking for help.
+ - Sheet not updating on a new computer: run
+       python -m pip install -r requirements.txt
+       python -m qb_agent sheet
+   and check the computer's clock is right.
