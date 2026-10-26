@@ -59,6 +59,20 @@ Typing "Pending" over a status cell tells the app to forget that step and send
 it again.
 
 
+STARTING THE STATUS COLUMNS OVER
+--------------------------------
+Months of sends leave the columns holding a mixture of real events and the
+app's old reading of rows. To put them back to the starting answer:
+
+    python -m qb_agent reset            prints the plan, changes nothing
+    python -m qb_agent reset --write    applies it
+
+It writes Pending for anything there is to do and Not needed where there is
+nothing to bill, and clears this machine's record of what it has sent. Close
+the dashboard first, and note where you are in the sheet's File > Version
+history - there is no undo in the app.
+
+
 IF SOMETHING LOOKS WRONG
 ------------------------
  - Click did nothing: QuickBooks probably has a window open. The app now says
