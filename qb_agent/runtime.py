@@ -1006,12 +1006,15 @@ class Runtime:
                                 f"The ones below have similar names - pick one if it is the "
                                 f"same business, or create a new customer."
                             )
-                        else:
-                            reason = (
-                                f"This customer is not in QuickBooks. Nothing there matches the "
-                                f"name or the location '{record.location}', so creating it is "
-                                f"the only option here."
-                            )
+                        elif not location_candidates:
+                            # Nothing to choose between. Asking a question with
+                            # one possible answer only slows the batch down.
+                            automatic.append({
+                                "source_id": record.source_id,
+                                "action": "create",
+                                "list_id": "",
+                            })
+                            continue
                         ambiguous.append({
                             "source_id": record.source_id,
                             "customer_name": record.customer_name,
@@ -1034,6 +1037,21 @@ class Runtime:
                 if key not in candidate_cache:
                     candidate_cache[key] = list(gateway.customer_candidates(record.quickbooks_customer_name))
                 candidates = candidate_cache[key]
+                if not candidates and not reason:
+                    # A reason already set means something went wrong - the
+                    # customer chosen before has been deleted - and that is
+                    # worth saying rather than quietly starting a new one.
+                    #
+                    # QuickBooks holds nothing like this name, so there is no
+                    # judgement left to make: the customer is new. The picker
+                    # offered a single radio button and waited, which is the
+                    # app asking a question it has already answered.
+                    automatic.append({
+                        "source_id": record.source_id,
+                        "action": "create",
+                        "list_id": "",
+                    })
+                    continue
                 if not reason:
                     reason = (
                         "This exact name is not in QuickBooks. The customers below have "
