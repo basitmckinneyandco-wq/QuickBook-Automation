@@ -329,6 +329,17 @@ class Runtime:
                 # Same as above: the reset has already cleared any mark, so a
                 # mark that is still here was made since, and stands.
                 from_sheet = ""
+            if (
+                from_sheet == "not_needed"
+                and kind == "premium"
+                and not record.direct_billed
+                and not (saved is not None and saved.status)
+            ):
+                # The app writes "Not needed" against a direct-billed premium
+                # by rule, and the sheet is believed over the row. Change the
+                # Billing column to Agency afterwards and that word would hold
+                # the premium down for ever, with nobody having decided it.
+                from_sheet = ""
             if saved is not None:
                 item[f"{kind}_txn_id"] = saved.txn_id
                 item[f"{kind}_ref_number"] = saved.ref_number
@@ -904,6 +915,7 @@ class Runtime:
         # either way, and the sheet is only how the other dashboard hears of it.
         self._publish_status(results)
         self._publish_mappings(results)
+        self._publish_direct_billing(results)
         return results + unknown
 
     def customer_resolutions(self, source_ids: list[str]) -> dict[str, object]:
@@ -1369,10 +1381,17 @@ class Runtime:
                 # decision. Written to the sheet it becomes permanent: fill the
                 # commission in afterwards and the cell still says Not needed,
                 # for ever, because the sheet is believed over the row.
+                #
+                # A direct-billed premium is the exception. The carrier bills
+                # the insured, so no premium invoice is ever raised - that is
+                # a standing fact about the policy, not a reading of amounts
+                # that may still be filled in, and the office wants to see it
+                # in the sheet without marking every such row by hand.
                 if word == "Not needed":
                     kind = field.removesuffix("_status")
                     decided = marks.get(kind)
-                    if decided is None or decided.status != "not_needed":
+                    by_rule = kind == "premium" and record.direct_billed
+                    if not by_rule and (decided is None or decided.status != "not_needed"):
                         continue
                 # Every status, not only the ones that record an action: the
                 # sheet is meant to show what the dashboard shows, so somebody
@@ -1538,6 +1557,52 @@ class Runtime:
                 self._remember(source_id, column, before)
         else:
             self.sheet_write_error = ""
+
+    def _publish_direct_billing(self, results: list[dict[str, object]]) -> None:
+        """Say "Not needed" in the sheet for a direct-billed premium.
+
+        On a direct-billed policy the carrier bills the insured, so the agency
+        raises no premium invoice. The dashboard has shown that for a while;
+        the sheet went on saying Pending, which reads as work still waiting
+        and had to be corrected by hand on every such row.
+
+        Only the premium, and only where nothing has been recorded against it
+        - a premium that was raised, failed or deliberately asked for again is
+        a real event, and must not be written over by the rule.
+        """
+        settings = self.config.google_sheet
+        if not (settings.enabled and settings.write_status and results):
+            return
+        source_ids = [str(item.get("source_id", "")) for item in results]
+        marks = self.store.invoice_states(source_ids, self.config.mode)
+        updates: list[tuple[str, str]] = []
+        touched: list[tuple[str, str]] = []      # (policy, word before)
+        for source_id in source_ids:
+            record = self.records.get(source_id)
+            if record is None or not record.direct_billed:
+                continue
+            held = marks.get(source_id, {}).get("premium")
+            if held is not None and held.status:
+                continue
+            before = self._held(source_id, "qb_premium")
+            if before == "Not needed":
+                continue
+            cell = self._cell_for(record, "qb_premium")
+            if not cell:
+                continue
+            updates.append((cell, "Not needed"))
+            touched.append((source_id, before))
+            self._remember(source_id, "qb_premium", "Not needed")
+        if not updates:
+            return
+        try:
+            self._sheets().write(updates)
+        except SheetsError as exc:
+            self.sheet_write_error = str(exc)
+            # The sheet still says what it said. Believing otherwise is how a
+            # failed write becomes a reset on the next read.
+            for source_id, before in touched:
+                self._remember(source_id, "qb_premium", before)
 
     def _mapping_cell(self, record: WorkRecord, column: str) -> str:
         """The A1 address of one row's mapping column, adding it if absent."""
