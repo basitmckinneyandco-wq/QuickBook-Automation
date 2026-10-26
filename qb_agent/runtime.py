@@ -1447,6 +1447,74 @@ class Runtime:
         self.sheet_write_error = ""
         return {"written": written, "rows": len(rows), "unplaced": unplaced}
 
+    # What each status column should say about a row when nothing has been
+    # done to it yet - worked out from the row itself, with no history.
+    _RESET_FIELDS = (
+        ("qb_customer_job", ""),
+        ("qb_premium", "premium"),
+        ("qb_commission", "commission"),
+        ("qb_fees", "fees"),
+    )
+
+    def reset_statuses(self, write: bool = False) -> dict[str, object]:
+        """Put the four status columns back to what the rows alone say.
+
+        Months of sends leave the columns holding a mixture of real events and
+        the app's old reading of rows - "Needs review" on a row whose figures
+        were filled in long ago, "Created" on work that has since been redone.
+        This throws all of it away and writes the starting answer afresh:
+        Pending for anything there is to do, Not needed where there is nothing
+        to bill. A direct-billed premium is Not needed by the office's rule.
+
+        This machine's record of what it has sent goes too. Leaving it would
+        put "Created" straight back on the next pass, which is the opposite of
+        a reset - and with it gone, a row that really is in QuickBooks is found
+        by its policy number and year and updated rather than duplicated.
+        """
+        settings = self.config.google_sheet
+        if not (settings.enabled and settings.write_status):
+            raise SheetsError("Writing to the sheet is switched off in config.json.")
+
+        planned: list[tuple[str, str, str, str]] = []   # policy, column, word, cell
+        unplaced: list[str] = []
+        for record in list(self.records.values()):
+            for column, kind in self._RESET_FIELDS:
+                word = "Pending" if not kind or record.invoice_applies(kind) else "Not needed"
+                cell = self._cell_for(record, column)
+                if not cell:
+                    unplaced.append(record.customer_name)
+                    break        # its row cannot be found; leave the whole row alone
+                planned.append((record.source_id, column, word, cell))
+
+        counts: dict[str, dict[str, int]] = {}
+        for _, column, word, _ in planned:
+            counts.setdefault(column, {}).setdefault(word, 0)
+            counts[column][word] += 1
+        summary = {
+            "rows": len(self.records),
+            "cells": len(planned),
+            "counts": counts,
+            "unplaced": sorted(set(unplaced)),
+            "written": 0,
+        }
+        if not write or not planned:
+            return summary
+
+        for source_id in {source_id for source_id, *_ in planned}:
+            self.store.forget_record(source_id, self.config.mode)
+            for kind in set(INVOICE_KINDS.values()):
+                self.store.forget_invoice(source_id, self.config.mode, kind)
+
+        updates = [(cell, word) for _, _, word, cell in planned]
+        written = 0
+        for start in range(0, len(updates), 500):
+            written += self._sheets().write(updates[start:start + 500])
+        for source_id, column, word, _ in planned:
+            self._remember(source_id, column, word)
+        self._wrote((source_id, column) for source_id, column, _, _ in planned)
+        summary["written"] = written
+        return summary
+
     def _held(self, source_id: str, column: str) -> str:
         """What this machine believes the sheet says in one status cell."""
         record = self.records.get(source_id)

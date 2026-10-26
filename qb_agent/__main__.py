@@ -47,6 +47,14 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.add_parser("doctor", help="Diagnose why QuickBooks cannot be reached.")
     subparsers.add_parser("sheet", help="Diagnose why the Google Sheet is not updating.")
 
+    reset_parser = subparsers.add_parser(
+        "reset", help="Put the four status columns back to Pending / Not needed."
+    )
+    reset_parser.add_argument(
+        "--write", action="store_true",
+        help="Actually write. Without it nothing is changed and the plan is printed.",
+    )
+
     args = parser.parse_args(argv)
     command = args.command or "serve"
 
@@ -69,6 +77,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "sheet":
         return _sheet(config)
+
+    if command == "reset":
+        return _reset(runtime, bool(getattr(args, "write", False)))
 
     # A transferred installation intentionally starts with no company path.
     # In that state the only safe choice is the company QuickBooks already has
@@ -190,6 +201,52 @@ def _sheet(config) -> int:
     print("\n  The sheet can be read and the account is signed in. If statuses")
     print("  still do not appear, the account above needs Editor access, not")
     print("  Viewer - check the Share list on the sheet itself.\n")
+    return 0
+
+
+def _reset(runtime, write: bool) -> int:
+    """Clear the four status columns on the rows the app works with.
+
+    Printed and not written unless --write is given. The sheet is shared, the
+    change covers every loaded row at once, and there is no undo here - Google
+    Sheets' own File > Version history is the way back.
+    """
+    from .gsheets import SheetsError
+
+    print("\n  Reading the policies...")
+    try:
+        runtime.fetch_web()
+    except Exception as exc:
+        print(f"\n  The policies could not be read: {exc}\n", file=sys.stderr)
+        return 1
+
+    try:
+        summary = runtime.reset_statuses(write=write)
+    except SheetsError as exc:
+        print(f"\n  {exc}\n", file=sys.stderr)
+        return 1
+
+    print(f"\n  {summary['rows']} policies loaded, {summary['cells']} cells to set:\n")
+    for column, words in summary["counts"].items():
+        parts = ", ".join(f"{count} {word}" for word, count in sorted(words.items()))
+        print(f"    {column:<18} {parts}")
+
+    if summary["unplaced"]:
+        print(
+            f"\n  {len(summary['unplaced'])} policies were skipped: their row in the sheet"
+            "\n  could not be identified, and writing to a guessed row is worse than"
+            "\n  not writing at all. "
+            + ", ".join(summary["unplaced"][:5])
+            + ("..." if len(summary["unplaced"]) > 5 else "")
+        )
+
+    if not write:
+        print("\n  Nothing was changed. To apply it:\n")
+        print("      python -m qb_agent reset --write\n")
+        return 0
+
+    print(f"\n  Done: {summary['written']} cells written, and this machine's record")
+    print("  of what it has sent was cleared for those policies.\n")
     return 0
 
 
