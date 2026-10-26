@@ -81,6 +81,8 @@ FIELDS: dict[str, tuple[str, ...]] = {
     "qb_customer_target": ("qb customer target",),
     "qb_customer_id": ("qb customer id",),
     "qb_customer_action": ("qb customer action",),
+    "qb_job_target": ("qb job target",),
+    "qb_job_id": ("qb job id",),
 }
 
 # Columns shown in the dashboard but never sent to QuickBooks.
@@ -93,6 +95,7 @@ DISPLAY_FIELDS = (
     # sheet has no status columns, or when nobody has sent it yet.
     "qb_customer_job", "qb_premium", "qb_commission", "qb_fees",
     "qb_customer_target", "qb_customer_id", "qb_customer_action",
+    "qb_job_target", "qb_job_id",
     "old_policy_number", "location",
 )
 

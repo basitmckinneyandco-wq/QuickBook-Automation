@@ -198,6 +198,17 @@ class WorkRecord:
         return self._extra("qb_customer_target")
 
     @property
+    def mapped_job_list_id(self) -> str:
+        """The QuickBooks job this row reached last time it was sent.
+
+        A line of business is written a dozen ways between the sheet and
+        QuickBooks, so matching it by name is a judgement every time. Once the
+        job is known, the name stops mattering: this is the job, whatever it
+        is called today.
+        """
+        return self._extra("qb_job_id")
+
+    @property
     def create_new_customer_selected(self) -> bool:
         return self._extra("qb_customer_action").casefold() == "create"
 

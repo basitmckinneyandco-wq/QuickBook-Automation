@@ -38,6 +38,11 @@ MAPPING_HEADERS = {
     "qb_customer_target": "qb customer target",
     "qb_customer_id": "qb customer id",
     "qb_customer_action": "qb customer action",
+    # Filled in after QuickBooks has done the work, not when the question is
+    # answered: a customer chosen as "create new" has no name or ID until it
+    # exists, and the job is only found or created during the send.
+    "qb_job_target": "qb job target",
+    "qb_job_id": "qb job id",
 }
 
 

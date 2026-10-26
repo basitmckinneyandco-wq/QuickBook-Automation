@@ -307,6 +307,11 @@ class ProcessingResult:
     steps: list[str] = field(default_factory=list)
     customer_list_id: str | None = None
     job_list_id: str | None = None
+    # What QuickBooks calls them, carried back so the sheet can record the
+    # destination in words as well as in IDs. Blank when the step did not
+    # touch that entity.
+    customer_name: str = ""
+    job_name: str = ""
     invoice_txn_id: str | None = None
     invoice_ref_number: str | None = None
     operation: str = Operation.CREATE_INVOICE.value
@@ -578,6 +583,7 @@ class Processor:
                     steps=steps,
                     customer_list_id=updated.list_id,
                     job_list_id=job_list_id,
+                    customer_name=updated.full_name,
                     operation=operation,
                 )
 
@@ -612,7 +618,9 @@ class Processor:
             target = customer
             job_list_id = None
             if record.has_job:
-                job, matches = self._find_lob_job(gateway, customer, record.quickbooks_job_name)
+                job, matches = self._find_lob_job(
+                    gateway, customer, record.quickbooks_job_name, record.mapped_job_list_id
+                )
                 if len(matches) > 1:
                     names = ", ".join(f"'{item.full_name}'" for item in matches)
                     return self._save(
@@ -666,6 +674,8 @@ class Processor:
                     steps=steps,
                     customer_list_id=customer.list_id,
                     job_list_id=job_list_id,
+                    customer_name=customer.full_name,
+                    job_name=target.full_name if record.has_job else "",
                     operation=operation,
                 )
 
@@ -701,6 +711,8 @@ class Processor:
                 steps=steps,
                 customer_list_id=customer.list_id,
                 job_list_id=job_list_id,
+                customer_name=customer.full_name,
+                job_name=target.full_name if record.has_job else "",
                 invoice_txn_id=invoice.txn_id,
                 invoice_ref_number=invoice.ref_number,
                 operation=operation,
@@ -771,13 +783,29 @@ class Processor:
             "completed",
             message,
             steps=steps,
+            # The job the invoice was raised against, so sending an invoice
+            # records the destination in the sheet just as sending the
+            # customer does. Only a job carries a colon in its name.
+            job_list_id=target.list_id if ":" in target.full_name else None,
+            job_name=target.full_name if ":" in target.full_name else "",
             invoice_txn_id=invoice.txn_id,
             invoice_ref_number=invoice.ref_number,
             operation=spec["operation"],
         )
 
-    def _find_lob_job(self, gateway, customer, lob: str):
-        """Find one existing job equivalent to the dashboard LOB, never by policy."""
+    def _find_lob_job(self, gateway, customer, lob: str, known_list_id: str = ""):
+        """Find one existing job equivalent to the dashboard LOB, never by policy.
+
+        A job this row has already been sent to is taken by its ID, which no
+        amount of renaming or re-spelling can disturb. Matching the line of
+        business by name is what is left when nothing was recorded, or when
+        the recorded job has since been deleted or moved to another customer.
+        """
+        if known_list_id:
+            known = gateway.find_customer_by_id(known_list_id)
+            if known is not None and known.full_name.startswith(f"{customer.full_name}:"):
+                return known, [known]
+
         exact = gateway.find_customer(f"{customer.full_name}:{lob}")
         if exact is not None:
             return exact, [exact]
@@ -801,6 +829,9 @@ class Processor:
         if not record.has_job:
             return None, None
 
+        # No known ID is passed here. This is the path that renames a job when
+        # the Line of Business was edited, and a job taken by its ID always
+        # "matches" - which would skip the very rename being asked for.
         job, matches = self._find_lob_job(gateway, customer, record.quickbooks_job_name)
         if len(matches) > 1:
             names = ", ".join(f"'{item.full_name}'" for item in matches)
@@ -820,12 +851,14 @@ class Processor:
                 )
             return job.list_id, None
 
+        # The sheet is asked before this machine's database: it carries what
+        # every computer did, so a job created on one machine is still renamed
+        # rather than duplicated when the row is edited on another.
         state = self.store.get(record.source_id, self.mode)
-        previous = (
-            gateway.find_customer_by_id(state.job_list_id)
-            if state is not None and state.job_list_id
-            else None
+        remembered = record.mapped_job_list_id or (
+            state.job_list_id if state is not None and state.job_list_id else ""
         )
+        previous = gateway.find_customer_by_id(remembered) if remembered else None
         if previous is not None:
             renamed = gateway.rename_job(record, previous)
             steps.append(f"Job renamed from '{previous.full_name}' to '{renamed.full_name}'.")
@@ -907,6 +940,8 @@ class Processor:
         steps: list[str] | None = None,
         customer_list_id: str | None = None,
         job_list_id: str | None = None,
+        customer_name: str = "",
+        job_name: str = "",
         invoice_txn_id: str | None = None,
         invoice_ref_number: str | None = None,
         error: str | None = None,
@@ -948,6 +983,8 @@ class Processor:
             steps=steps or [],
             customer_list_id=customer_list_id,
             job_list_id=job_list_id,
+            customer_name=customer_name,
+            job_name=job_name,
             invoice_txn_id=invoice_txn_id,
             invoice_ref_number=invoice_ref_number,
             operation=operation.value,

@@ -84,7 +84,10 @@ def _names_agree(sheet_name: str, quickbooks_name: str) -> bool:
 
 # The four columns a dashboard writes, as the rows carry them.
 STATUS_FIELDS = ("qb_customer_job", "qb_premium", "qb_commission", "qb_fees")
-MAPPING_FIELDS = ("qb_customer_target", "qb_customer_id", "qb_customer_action")
+MAPPING_FIELDS = (
+    "qb_customer_target", "qb_customer_id", "qb_customer_action",
+    "qb_job_target", "qb_job_id",
+)
 RESOLUTION_FIELDS = (*MAPPING_FIELDS, "old_policy_number", "location")
 
 # Words that record something having happened, and so may be written back into
@@ -900,6 +903,7 @@ class Runtime:
         # reported but never fails the batch - the work in QuickBooks is done
         # either way, and the sheet is only how the other dashboard hears of it.
         self._publish_status(results)
+        self._publish_mappings(results)
         return results + unknown
 
     def customer_resolutions(self, source_ids: list[str]) -> dict[str, object]:
@@ -1234,7 +1238,7 @@ class Runtime:
         }
 
     def _ensure_mapping_columns(self, label: str) -> dict[str, int]:
-        """Find or append the three hidden mapping columns for one tab."""
+        """Find or append the hidden mapping columns for one tab."""
         settings = self.config.google_sheet
         if not (settings.enabled and settings.write_status):
             raise SheetsError("Writing customer choices back to Google Sheets is switched off.")
@@ -1460,6 +1464,80 @@ class Runtime:
         else:
             self.sheet_write_error = ""
             self._wrote((source_id, column) for source_id, column, _ in touched)
+
+    # What a finished send tells the sheet about where the row ended up.
+    _MAPPING_RESULTS = (
+        ("customer_name", "qb_customer_target"),
+        ("customer_list_id", "qb_customer_id"),
+        ("job_name", "qb_job_target"),
+        ("job_list_id", "qb_job_id"),
+    )
+
+    def _publish_mappings(self, results: list[dict[str, object]]) -> None:
+        """Record in the sheet which QuickBooks customer and job a row reached.
+
+        The picker writes down the answer it was given, which is everything it
+        knows - but a row sent as "create new" has no customer yet at that
+        point, and the job is only found or created during the send itself. So
+        the IDs that matter are first known here, when QuickBooks has done the
+        work, and until now they were kept only in this machine's database.
+        Written into the sheet they are shared: every computer goes straight to
+        the same customer and the same job, whatever anyone renames afterwards.
+        """
+        settings = self.config.google_sheet
+        if not (settings.enabled and settings.write_status and results):
+            return
+        updates: list[tuple[str, str]] = []
+        touched: list[tuple[str, str, str]] = []
+        for item in results:
+            source_id = str(item.get("source_id", ""))
+            record = self.records.get(source_id)
+            if record is None or str(item.get("status", "")) not in ("completed", "already_exists"):
+                continue
+            for key, column in self._MAPPING_RESULTS:
+                value = str(item.get(key) or "")
+                # A step that did not touch the customer or the job reports
+                # nothing for it. Writing that blank would erase a good ID.
+                if not value or self._held(source_id, column) == value:
+                    continue
+                try:
+                    cell = self._mapping_cell(record, column)
+                except SheetsError as exc:
+                    self.sheet_write_error = str(exc)
+                    return
+                if not cell:
+                    continue
+                updates.append((cell, value))
+                touched.append((source_id, column, self._held(source_id, column)))
+                self._remember(source_id, column, value)
+        if not updates:
+            return
+        try:
+            self._sheets().write(updates)
+        except SheetsError as exc:
+            self.sheet_write_error = str(exc)
+            for source_id, column, before in touched:
+                self._remember(source_id, column, before)
+        else:
+            self.sheet_write_error = ""
+
+    def _mapping_cell(self, record: WorkRecord, column: str) -> str:
+        """The A1 address of one row's mapping column, adding it if absent."""
+        label = self._tab_label(record.source_tab)
+        row = self._sheet_row(record)
+        title = self.config.google_sheet.tab_titles.get(label, "")
+        if row < 1 or not title:
+            return ""
+        # Reading the tab to find the columns costs a round trip, so it is done
+        # once: afterwards their positions are known for every other row.
+        known = self._status_columns.get(label, {})
+        columns = (
+            known if all(field in known for field in MAPPING_FIELDS)
+            else self._ensure_mapping_columns(label)
+        )
+        if column not in columns:
+            return ""
+        return f"'{title}'!{column_letter(columns[column])}{row}"
 
     def _status_cell(self, source_id: str, operation: str) -> str:
         """The A1 address of one row's status column, or "" if it cannot be found."""
