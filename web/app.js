@@ -1994,7 +1994,10 @@ async function createInvoice() {
   );
   const records = invoicingRecords();
   if (!kinds.length || !records.length) return;
-  if (state.health && state.health.writes_enabled && !(await quickBooksIsReady())) return;
+  if (state.health && state.health.writes_enabled && !(await quickBooksIsReady())) {
+    toast("Nothing was sent. Close what QuickBooks is waiting on, then send again.", true);
+    return;
+  }
 
   // Each kind goes only to the rows it applies to, so ticking Fees on a mixed
   // selection bills the policies that have a fee and leaves the rest alone.
@@ -3633,7 +3636,13 @@ async function processSelected(operation = "create_customer") {
   const spec = OPERATIONS[operation];
   const live = Boolean(state.health && state.health.writes_enabled);
   const noun = `${ids.length} polic${ids.length === 1 ? "y" : "ies"}`;
-  if (live && !(await quickBooksIsReady())) return;
+  // Every way of stopping here says so. Stopping quietly looks exactly like a
+  // click that was never received, and the person clicks again, or concludes
+  // the app is broken, when it did what they asked it to.
+  if (live && !(await quickBooksIsReady())) {
+    toast("Nothing was sent. Close what QuickBooks is waiting on, then send again.", true);
+    return;
+  }
   if (
     live &&
     !(await ask({
@@ -3645,6 +3654,7 @@ async function processSelected(operation = "create_customer") {
       tone: "ask",
     }))
   ) {
+    toast("Nothing was sent.");
     return;
   }
   await processBatch(operation, ids, spec.button, { noun, label: spec.label, clear: true });
