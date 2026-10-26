@@ -310,7 +310,12 @@ class Runtime:
         elif state is not None and state.status:
             item["status"] = state.status
         else:
-            item["status"] = "review" if record.review_reasons() else "ready"
+            # Only what stops the CUSTOMER and its job. This column is the
+            # customer/job step, and the processor judges that step by the
+            # same short list - so a zero amount, which blocks no customer,
+            # was being reported here as a customer that needs attention and
+            # sent people looking in the wrong place.
+            item["status"] = "review" if record.customer_reasons() else "ready"
 
         held = invoices or {}
         for kind in INVOICE_KINDS.values():

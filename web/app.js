@@ -2336,16 +2336,19 @@ function buildRow(record) {
 
   // Mirrors WorkRecord.customer_reasons() server-side — a missing policy
   // number blocks Send too, not just invoicing, so it's never offered.
-  const blocked = reasons.some((reason) =>
+  const customerReasons = reasons.filter((reason) =>
     reason.startsWith("Customer name") || reason.startsWith("Job name") || reason.startsWith("Policy number")
   );
+  const blocked = customerReasons.length > 0;
   const detail = simulated
     ? "Safe mode is on, so this was only simulated — nothing was written to QuickBooks."
     : record.error_message && status === "failed"
       ? record.error_message
       // Same as the invoice badges: once the customer and job exist, the
-      // reasons they could not be created are history, not a warning.
-      : (DONE.has(status) ? "" : reasons.join(" "));
+      // reasons they could not be created are history, not a warning. And an
+      // invoice-only problem is told on the invoice badge that owns it, not
+      // here - this badge answers for the customer and its job alone.
+      : (DONE.has(status) ? "" : customerReasons.join(" "));
 
   const view = { status, simulated, confirmedInQb, reasons, edited, blocked, detail, live };
 
