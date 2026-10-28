@@ -1,0 +1,32 @@
+# Real settings: holds the published-sheet link and the company file path.
+# config.example.json is the one that ships.
+config.json
+config-*.json
+
+# The Google service account's private key. This is a password: anyone holding
+# it can read and write every sheet the account can reach. It never goes into
+# git, and never into the zip that is sent to other machines.
+service-account.json
+*service*account*.json
+*-key.json
+credentials.json
+
+# Every history database - these hold real customer and policy records.
+*.db
+
+# The spreadsheet the live data is shaped from.
+*.xlsx
+
+# A separate, earlier project that happens to sit in this folder.
+Accounting Automation/
+
+# Build output.
+build/
+dist/
+*.zip
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store

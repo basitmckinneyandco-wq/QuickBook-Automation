@@ -1,0 +1,35 @@
+{
+  "mode": "dry_run",
+  "allow_writes": false,
+  "listen_host": "127.0.0.1",
+  "listen_port": 8770,
+  "database_path": "qb_automation.db",
+  "app_name": "QB Automation Dashboard",
+  "qbxml_version": "13.0",
+  "company": {
+    "display_name": "My Test Company",
+    "file_path": ""
+  },
+  "invoice": {
+    "template": "",
+    "premium": {
+      "template": "Mckinney & Co.(Premium Payment)",
+      "ar_account": "Accounts Receivable:Premium"
+    },
+    "commission": {
+      "template": "Mckinney & Co. (Comm)",
+      "ar_account": "Accounts Receivable:Commission",
+      "item_income_account": "Commission Income"
+    },
+    "fees": {
+      "template": "Mckinney & Co. (Comm)",
+      "ar_account": "Accounts Receivable:Handling Fees",
+      "item": "Fees",
+      "item_income_account": "Commission Income"
+    }
+  },
+  "data_source": {
+    "url": "",
+    "default_tab": "nb"
+  }
+}

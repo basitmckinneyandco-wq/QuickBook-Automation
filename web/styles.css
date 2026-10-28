@@ -1,0 +1,1668 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   Theme tokens. Light lives on :root. Dark is declared twice — once for the
+   system preference (unless the user forced light) and once for the explicit
+   toggle — so the toggle always wins.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  color-scheme: light;
+  --bg: #f4f7f6;
+  --surface: #ffffff;
+  --surface-2: #f8faf9;
+  --side: #ffffff;
+  --line: #e5e9e7;
+  --line-soft: #eff2f1;
+  --text: #14201c;
+  --muted: #687772;
+  --faint: #98a4a0;
+  --accent: #10715a;
+  --accent-tint: #e9f4f0;
+  --warn: #92600d;
+  --warn-tint: #fcf3e3;
+  --danger: #a3251d;
+  --danger-tint: #fceeec;
+  --good: #146f48;
+  --good-tint: #e7f4ed;
+  /* What to write ON a filled accent or danger surface. Light themes take
+     white; dark themes have light fills, so they need ink instead. */
+  --on-accent: #ffffff;
+  --on-danger: #ffffff;
+
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --gap: 18px;
+  --pad: 20px;
+  --shadow: 0 1px 2px rgba(20, 35, 30, .04), 0 12px 30px -20px rgba(20, 35, 30, .24);
+}
+
+/* Dark is a deep blue-green slate rather than neutral black: it carries a
+   trace of the same green as the accent, so surfaces read as a considered
+   surface instead of switched-off pixels, and each layer steps up in
+   lightness so cards lift off the page without needing heavy shadows.
+
+   The two blocks below must stay identical - one answers the system setting,
+   the other the in-app toggle. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0f1618;
+    --surface: #161f22;
+    --surface-2: #1c272a;
+    --side: #121a1d;
+    --line: #2a383c;
+    --line-soft: #202c30;
+    --text: #e9f1ef;
+    --muted: #9db0ad;
+    --faint: #7a8d8a;
+    --accent: #4bdcb0;
+    --accent-tint: #103429;
+    --warn: #f0c065;
+    --warn-tint: #3a2f17;
+    --danger: #ff9b92;
+    --danger-tint: #3d2427;
+    --good: #66e0a6;
+    --good-tint: #123528;
+    --on-accent: #08211a;
+    --on-danger: #3d1f1c;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .34), 0 18px 40px -24px rgba(0, 0, 0, .8);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0f1618;
+  --surface: #161f22;
+  --surface-2: #1c272a;
+  --side: #121a1d;
+  --line: #2a383c;
+  --line-soft: #202c30;
+  --text: #e9f1ef;
+  --muted: #9db0ad;
+  --faint: #7a8d8a;
+  --accent: #4bdcb0;
+  --accent-tint: #103429;
+  --warn: #f0c065;
+  --warn-tint: #3a2f17;
+  --danger: #ff9b92;
+  --danger-tint: #3d2427;
+  --good: #66e0a6;
+  --good-tint: #123528;
+  --on-accent: #08211a;
+  --on-danger: #3d1f1c;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .34), 0 18px 40px -24px rgba(0, 0, 0, .8);
+}
+
+/* ═══ base ═══════════════════════════════════════════════════════════════ */
+
+* { box-sizing: border-box; }
+
+/* Must outrank .view{display:flex} and friends, or hidden sections still show. */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 400 13.5px/1.55 "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-feature-settings: "cv05" 1, "ss03" 1;  /* friendlier l and a in Inter */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  letter-spacing: -.003em;
+}
+
+h1, h2, p { margin: 0; }
+button, input, select { font: inherit; color: inherit; }
+button { font-feature-settings: "tnum" 0; }
+code, .mono {
+  font-family: "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
+  font-size: .92em;
+}
+code { background: var(--line-soft); padding: 1.5px 6px; border-radius: 5px; }
+em { font-style: normal; }
+.muted { color: var(--muted); font-size: 13px; line-height: 1.6; }
+.spacer { flex: 1 1 auto; }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+/* ═══ layout ═════════════════════════════════════════════════════════════ */
+
+.layout {
+  display: grid; grid-template-columns: 250px minmax(0, 1fr); min-height: 100vh;
+  transition: grid-template-columns .22s ease;
+}
+
+/* Collapsed: the sidebar gives its width back to the table. The toggle lives
+   in the top bar, so it stays reachable once the sidebar is gone. */
+:root[data-sidebar="collapsed"] .layout { grid-template-columns: 0 minmax(0, 1fr); }
+:root[data-sidebar="collapsed"] .sidebar {
+  padding-left: 0; padding-right: 0;
+  border-right: 0; overflow: hidden;
+}
+:root[data-sidebar="collapsed"] .sidebar > * {
+  opacity: 0; pointer-events: none; transition: opacity .12s ease;
+}
+.sidebar > * { transition: opacity .18s ease .06s; }
+
+.sidebar-toggle { flex: 0 0 auto; margin-right: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .layout, .sidebar > * { transition: none; }
+}
+
+/* ═══ sidebar ════════════════════════════════════════════════════════════ */
+
+.sidebar {
+  background: linear-gradient(180deg, var(--side) 0%, color-mix(in srgb, var(--side) 92%, var(--accent-tint)) 100%); border-right: 1px solid var(--line);
+  display: flex; flex-direction: column;
+  padding: 18px 12px 16px; position: sticky; top: 0; height: 100vh;
+}
+
+.side-brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 22px; }
+.mark {
+  width: 34px; height: 34px; border-radius: 10px; flex: 0 0 auto;
+  /* Fixed greens, not var(--accent): the dark theme's accent is a pale mint,
+     and a white glyph on it drops to 1.7:1. This pair holds up in both. */
+  background: linear-gradient(145deg, #12806a, #17a37f); color: #fff;
+  display: grid; place-items: center;
+  box-shadow: 0 7px 14px -8px color-mix(in srgb, var(--accent) 75%, transparent);
+}
+.side-brand-text { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.side-brand-text strong { font-size: 13.5px; font-weight: 650; letter-spacing: -.01em; line-height: 1.2; }
+.side-brand-text span {
+  font-size: 11.5px; color: var(--muted); line-height: 1.3;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.nav { display: flex; flex-direction: column; gap: 2px; }
+.nav-label {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--faint); padding: 14px 10px 5px;
+}
+.nav-label:first-child { padding-top: 0; }
+
+.nav-item {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 8px 10px; border: 0; border-radius: var(--r-sm);
+  background: none; color: var(--muted); cursor: pointer;
+  font-size: 13.5px; font-weight: 500; text-align: left; line-height: 1.4;
+  transition: background .13s, color .13s;
+}
+.nav-item svg { flex: 0 0 auto; }
+.nav-item > span { flex: 1 1 auto; min-width: 0; }
+.nav-item:hover { background: color-mix(in srgb, var(--accent-tint) 52%, transparent); color: var(--text); }
+.nav-item.is-active { background: var(--accent-tint); color: var(--accent); font-weight: 650; box-shadow: inset 3px 0 0 var(--accent); }
+
+.nav-count {
+  font-size: 10.5px; font-weight: 650; line-height: 1.6;
+  color: var(--faint); background: var(--line-soft);
+  padding: 1px 7px; border-radius: 999px; min-width: 22px; text-align: center;
+}
+.nav-count:empty { display: none; }
+.nav-item.is-active .nav-count { background: var(--surface); color: var(--accent); }
+.nav-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); display: none; flex: 0 0 auto; }
+.nav-dot.on { display: block; }
+
+.side-foot { margin-top: auto; padding-top: 16px; display: flex; flex-direction: column; gap: 9px; }
+.theme-toggle {
+  display: flex; align-items: center; justify-content: center; gap: 9px; width: 100%;
+  padding: 8px 10px; border-radius: var(--r-sm);
+  border: 1px solid var(--line); background: var(--surface);
+  color: var(--muted); font-size: 12px; font-weight: 600;
+}
+.theme-switch { position: relative; display: inline-flex; cursor: pointer; }
+.theme-switch input { position: absolute; inline-size: 1px; block-size: 1px; opacity: 0; }
+.theme-track {
+  width: 32px; height: 18px; padding: 2px; border-radius: 999px;
+  background: var(--faint); transition: background .18s ease;
+}
+.theme-track::after {
+  content: ""; display: block; width: 14px; height: 14px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .22); transition: transform .18s ease;
+}
+.theme-switch input:checked + .theme-track { background: var(--accent); }
+.theme-switch input:checked + .theme-track::after { transform: translateX(14px); }
+.theme-switch input:focus-visible + .theme-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.link-line { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--faint); padding: 0 4px; }
+.link-line i { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); flex: 0 0 auto; }
+.link-line.ok i { background: var(--good); }
+.link-line.bad i { background: var(--danger); }
+.link-line span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ═══ main ═══════════════════════════════════════════════════════════════ */
+
+.main { min-width: 0; display: flex; flex-direction: column; }
+
+.topbar {
+  display: flex; align-items: center; gap: 16px;
+  padding: 18px 28px; border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter: blur(14px); position: sticky; top: 0; z-index: 5; min-height: 76px;
+}
+/* Takes the slack so the toggle sits left and the mode badge stays right. */
+.page-head { flex: 1 1 auto; min-width: 0; }
+.page-head h1 { font-size: 21px; font-weight: 700; letter-spacing: -.03em; line-height: 1.25; }
+.page-head p { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.topbar-actions { display: flex; align-items: center; gap: 8px; }
+
+.badge {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 5px 12px; border-radius: 999px; white-space: nowrap;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .06em;
+  background: var(--accent-tint); color: var(--accent);
+  transition: background-color .25s ease, color .25s ease, box-shadow .25s ease;
+}
+.badge .pulse {
+  position: relative; flex: 0 0 auto;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor;
+}
+
+.badge.live {
+  background: var(--danger-tint); color: var(--danger);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--danger) 18%, transparent);
+}
+/* A ring expanding out of the dot - the giveaway that writes are switched on. */
+.badge.live .pulse::after {
+  content: ""; position: absolute; inset: 0;
+  border-radius: 50%; background: currentColor;
+  animation: pulse-ring 2s cubic-bezier(.22, .61, .36, 1) infinite;
+  will-change: transform, opacity;
+}
+@keyframes pulse-ring {
+  0%   { transform: scale(1);   opacity: .55; }
+  70%  { transform: scale(3.2); opacity: 0; }
+  100% { transform: scale(3.2); opacity: 0; }
+}
+
+/* Safe mode breathes gently instead - present, but not shouting. */
+.badge:not(.live) .pulse {
+  animation: pulse-fade 2.6s ease-in-out infinite;
+  will-change: opacity;
+}
+@keyframes pulse-fade {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: .35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .badge.live .pulse::after, .badge:not(.live) .pulse { animation: none; }
+}
+
+/* No width cap - the sheet is wide and the screen should be used. */
+.content { padding: 22px 28px 52px; width: 100%; flex: 1 1 auto; min-height: 0; display: flex; }
+.view { display: flex; flex-direction: column; gap: var(--gap); flex: 1 1 auto; min-width: 0; }
+
+/* The log is the whole point of its page, so it takes the height going spare
+   instead of stopping short and leaving the rest of the screen empty. */
+#view-history > .panel { flex: 1 1 auto; min-height: 0; }
+
+/* ═══ panels & tiles ═════════════════════════════════════════════════════ */
+
+.panel {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: 18px; box-shadow: var(--shadow); padding: var(--pad);
+  display: flex; flex-direction: column;
+}
+.panel-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 14px; min-height: 26px;
+  /* A long button drops onto its own line rather than off the panel edge. */
+  flex-wrap: wrap;
+}
+.panel-head > .btn { flex: 0 0 auto; }
+.panel-head h2 { font-size: 14.5px; font-weight: 650; letter-spacing: -.01em; }
+.panel-foot { margin-top: auto; padding-top: 14px; }
+
+.tiles { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(172px, 1fr)); }
+.tile {
+  position: relative; overflow: hidden; background: var(--surface); border: 1px solid var(--line); border-radius: 18px;
+  box-shadow: var(--shadow); padding: 17px 18px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.tile::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--faint); opacity: .55; }
+.tile.ready::before { background: var(--accent); opacity: 1; }
+.tile.review::before { background: var(--warn); opacity: 1; }
+.tile.done::before { background: var(--good); opacity: 1; }
+.tile span { font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); }
+.tile strong { font-size: 26px; font-weight: 650; letter-spacing: -.032em; line-height: 1.25; font-variant-numeric: tabular-nums; }
+.tile small { font-size: 11.5px; color: var(--muted); }
+.tile.ready strong { color: var(--accent); }
+.tile.review strong { color: var(--warn); }
+.tile.done strong { color: var(--good); }
+
+.split { display: grid; gap: var(--gap); grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); align-items: stretch; }
+.split.three { grid-template-columns: repeat(auto-fit, minmax(255px, 1fr)); }
+
+/* ── cards arrive with a slight 3D tilt ──────────────────────────────────
+   Each card starts pitched back in perspective and settles flat, a beat
+   after the one before it, so a page reads as layers coming to rest rather
+   than everything snapping in at once. `backwards` keeps the start state
+   from lingering, and nothing keeps a transform once it lands. */
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: perspective(1000px) rotateX(11deg) translate3d(0, 20px, -40px) scale(.965);
+  }
+  to {
+    opacity: 1;
+    transform: perspective(1000px) rotateX(0) translate3d(0, 0, 0) scale(1);
+  }
+}
+
+.view.enter .tile,
+.view.enter .panel,
+.view.enter .mini {
+  animation: card-in .62s cubic-bezier(.2, .85, .3, 1) backwards;
+  transform-origin: 50% 100%;
+}
+/* The stagger walks across the row, then down the page. */
+.view.enter .tiles > :nth-child(1), .view.enter .sheet-cards > :nth-child(1) { animation-delay: .00s; }
+.view.enter .tiles > :nth-child(2), .view.enter .sheet-cards > :nth-child(2) { animation-delay: .05s; }
+.view.enter .tiles > :nth-child(3), .view.enter .sheet-cards > :nth-child(3) { animation-delay: .10s; }
+.view.enter .tiles > :nth-child(4), .view.enter .sheet-cards > :nth-child(4) { animation-delay: .15s; }
+.view.enter .sheet-cards > :nth-child(5) { animation-delay: .20s; }
+.view.enter .sheet-cards > :nth-child(6) { animation-delay: .25s; }
+.view.enter .sheet-cards > :nth-child(7) { animation-delay: .30s; }
+.view.enter > .split:nth-of-type(1) > .panel { animation-delay: .18s; }
+.view.enter > .split:nth-of-type(2) > .panel { animation-delay: .26s; }
+.view.enter > .split:nth-of-type(3) > .panel { animation-delay: .34s; }
+.view.enter > .panel { animation-delay: .40s; }
+
+/* A card lifts toward you on hover - small enough to feel physical, not jumpy. */
+.tile, .mini {
+  transition: transform .26s cubic-bezier(.2, .85, .3, 1), box-shadow .26s ease,
+              border-color .26s ease;
+  will-change: transform;
+}
+.tile:hover, .mini:hover {
+  transform: perspective(900px) translate3d(0, -4px, 0) rotateX(3deg);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, .05), 0 22px 36px -22px rgba(0, 0, 0, .45);
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+}
+
+/* The bars grow from nothing the first time a panel appears. */
+@keyframes bar-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.view.enter .bar-track > span,
+.view.enter .mix-slice {
+  animation: bar-grow .75s .28s cubic-bezier(.2, .85, .3, 1) backwards;
+  transform-origin: left center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .view.enter .tile, .view.enter .panel, .view.enter .mini,
+  .view.enter .bar-track > span, .view.enter .mix-slice { animation: none; }
+  .tile:hover, .mini:hover { transform: none; }
+}
+
+/* ── the New Biz / Renewal bar ── */
+.mix {
+  display: flex; height: 12px; border-radius: 999px; overflow: hidden;
+  background: var(--line-soft); margin: 4px 0 14px;
+}
+.mix-slice { display: block; transition: width .5s cubic-bezier(.16, 1, .3, 1); }
+.tone-0 { background: var(--accent); }
+.tone-1 { background: color-mix(in srgb, var(--accent) 45%, var(--surface-2)); }
+.tone-2 { background: var(--faint); }
+
+.legend { display: flex; flex-direction: column; gap: 9px; }
+.legend-item { display: flex; align-items: center; gap: 9px; font-size: 13px; }
+.legend-item i { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 auto; }
+.legend-item span { flex: 1 1 auto; color: var(--muted); }
+.legend-item strong { font-weight: 650; font-variant-numeric: tabular-nums; }
+
+/* ── labelled progress bars, shared by three panels ── */
+.bars { display: flex; flex-direction: column; gap: 13px; }
+.bar-row { display: flex; flex-direction: column; gap: 6px; }
+.bar-head { display: flex; align-items: baseline; gap: 10px; font-size: 13px; }
+.bar-head span {
+  flex: 1 1 auto; color: var(--muted); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.bar-head strong { font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bar-track {
+  height: 7px; border-radius: 999px; background: var(--line-soft); overflow: hidden;
+}
+.bar-track > span {
+  display: block; height: 100%; border-radius: 999px; background: var(--accent);
+  transition: width .5s cubic-bezier(.16, 1, .3, 1);
+}
+.blockers .bar-track > span { background: var(--warn); }
+
+@media (prefers-reduced-motion: reduce) {
+  .mix-slice, .bar-track > span { transition: none; }
+}
+
+.log-filters { margin: 12px 0 2px; }
+.log-filters .search { max-width: 280px; }
+
+/* ── the activity log: one expandable entry per action ── */
+.log {
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--surface); margin-bottom: 8px; overflow: hidden;
+}
+.log > summary {
+  display: flex; align-items: flex-start; gap: 11px; padding: 11px 13px;
+  cursor: pointer; list-style: none;
+}
+.log > summary::-webkit-details-marker { display: none; }
+.log > summary:hover { background: var(--surface-2); }
+.log-title { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.log-title .strong { font-size: 13px; font-weight: 600; line-height: 1.45; }
+.log-title .sub { font-size: 12.5px; color: var(--muted); }
+.log-meta { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.log.failed { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
+.log.needs_review { border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+
+.log-detail {
+  padding: 4px 14px 14px 14px; border-top: 1px solid var(--line-soft);
+  display: flex; flex-direction: column; gap: 7px; background: var(--surface-2);
+}
+.log-label {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--faint); margin-top: 7px;
+}
+.log-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
+.log-steps li { font-size: 12.5px; color: var(--text); line-height: 1.5; }
+.log-error {
+  padding: 10px 12px; border-radius: 6px; font-size: 12px; line-height: 1.55;
+  background: var(--danger-tint); color: var(--danger); word-break: break-word;
+  white-space: pre-wrap;
+}
+.log-facts { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px; }
+.log-fact {
+  font-size: 11.5px; color: var(--muted);
+  font-family: "JetBrains Mono", "Cascadia Mono", Consolas, ui-monospace, monospace;
+}
+.log-detail .btn { align-self: flex-start; margin-top: 8px; }
+
+/* ── the pre-flight check ── */
+.checks { display: flex; flex-direction: column; gap: 8px; margin: 14px 0 4px; }
+/* Named 'pf', not 'check': the table's checkbox column already owns .check,
+   and styling both with one class put a bordered box round every checkbox. */
+.pf {
+  display: flex; align-items: flex-start; gap: 11px; padding: 10px 13px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-2);
+}
+.pf > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pf strong { font-size: 13px; font-weight: 600; }
+.pf span.mono { font-size: 12px; color: var(--muted); word-break: break-word; }
+.pf em { font-style: normal; font-size: 12px; color: var(--danger); margin-top: 3px; }
+.pf-mark {
+  flex: 0 0 auto; width: 20px; height: 20px; border-radius: 50%;
+  display: grid; place-items: center; font-size: 12px; font-weight: 700; line-height: 1;
+}
+.pf.ok { border-color: color-mix(in srgb, var(--good) 34%, var(--line)); }
+.pf.ok .pf-mark { background: var(--good-tint); color: var(--good); }
+.pf.bad { border-color: color-mix(in srgb, var(--danger) 50%, var(--line)); background: var(--danger-tint); }
+.pf.bad .pf-mark { background: var(--danger); color: var(--on-danger); }
+.bad-note { color: var(--danger); font-weight: 500; }
+.mode-state { font-size: 19px; font-weight: 650; letter-spacing: -.02em; margin-bottom: 5px; line-height: 1.3; }
+.mode-state.live { color: var(--danger); }
+.mode-state.safe { color: var(--accent); }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+
+/* A panel that mixes prose with a key/value list needs air between them,
+   or the sentence runs straight into the first row. */
+.panel > .muted + .kv, .panel > .kv + .muted { margin-top: 14px; }
+.panel > .muted { line-height: 1.6; }
+
+.kv { margin: 0; }
+.kv > div { display: flex; gap: 16px; padding: 9px 0; border-bottom: 1px solid var(--line-soft); font-size: 13px; align-items: baseline; }
+.kv > div:first-child { padding-top: 0; }
+.kv > div:last-child { border-bottom: 0; padding-bottom: 0; }
+.kv dt { color: var(--muted); flex: 0 0 168px; }
+.kv dd { margin: 0; word-break: break-word; flex: 1 1 auto; }
+.kv dd.on { color: var(--good); font-weight: 600; }
+.kv dd.off { color: var(--muted); }
+
+.steps { margin: 0; padding-left: 20px; color: var(--muted); font-size: 13px; line-height: 1.8; }
+
+/* ═══ buttons ════════════════════════════════════════════════════════════ */
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 8px 15px; border-radius: var(--r-sm); border: 1px solid transparent;
+  font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; line-height: 1.4;
+  transition: background .14s, filter .14s, opacity .14s;
+}
+.btn.small { padding: 6px 12px; font-size: 12px; }
+.btn.primary { background: var(--accent); color: var(--on-accent); }
+.btn.primary:hover:not(:disabled) { filter: brightness(.92); }
+.btn.ghost { background: var(--surface); border-color: var(--line); color: var(--text); }
+.btn.ghost:hover:not(:disabled) { background: var(--line-soft); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+
+.linky {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--accent); font-size: 12.5px; font-weight: 600;
+  text-decoration: underline; text-underline-offset: 2px;
+}
+
+/* ═══ dropzone ═══════════════════════════════════════════════════════════ */
+
+.dropzone {
+  border: 1.5px dashed var(--line); border-radius: var(--r-lg);
+  padding: 40px 20px; text-align: center; cursor: pointer;
+  background: var(--surface); color: var(--muted);
+  transition: border-color .15s, background .15s, color .15s;
+}
+.dropzone:hover, .dropzone:focus-visible, .dropzone.hover {
+  border-color: var(--accent); background: var(--accent-tint); color: var(--accent); outline: none;
+}
+.drop-icon { color: var(--accent); margin-bottom: 10px; }
+.drop-title { font-size: 15px; font-weight: 650; color: var(--text); letter-spacing: -.01em; }
+.drop-sub { font-size: 12.5px; margin-top: 4px; }
+
+.loaded-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 12px 16px; border: 1px solid var(--line);
+  border-radius: var(--r-md); background: var(--surface); color: var(--muted);
+  box-shadow: var(--shadow);
+}
+.file-icon { color: var(--accent); flex: 0 0 auto; }
+.file-name { font-weight: 650; color: var(--text); font-size: 13px; }
+.stats { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  padding: 3px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 600; line-height: 1.5;
+  background: var(--surface-2); border: 1px solid var(--line); color: var(--muted);
+}
+.chip.ready { color: var(--accent); }
+.chip.review { color: var(--warn); }
+.chip.done { color: var(--good); }
+
+.sheet-cards {
+  display: grid; gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+.mini {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: 16px; box-shadow: var(--shadow); padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 1px;
+  transition: border-color .25s;
+}
+.mini > span {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--faint);
+}
+.mini > strong {
+  font-size: 26px; font-weight: 650; letter-spacing: -.032em; line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+}
+.mini > small { font-size: 11.5px; color: var(--muted); }
+.mini.ready > strong { color: var(--accent); }
+.mini.review > strong { color: var(--warn); }
+.mini.value > strong { color: var(--text); }
+.mini.done > strong { color: var(--good); }
+
+/* Two counts sharing one card: "13 / 21". */
+.mini > strong.pair { display: flex; align-items: baseline; gap: 6px; }
+.mini > strong.pair em { font-style: normal; }
+.mini > strong.pair i {
+  font-style: normal; font-size: 19px; font-weight: 400; color: var(--faint);
+}
+
+/* A brief lift when a filter changes the number underneath. */
+.mini.bump, .tile.bump {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+/* Ease back out of the bump rather than snapping. */
+.mini, .tile { transition: border-color .35s ease, box-shadow .35s ease; }
+
+.filterbar {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 12px 16px; border: 1px solid var(--line); border-radius: 16px;
+  background: var(--surface); box-shadow: var(--shadow);
+}
+.custom-range { display: flex; align-items: center; gap: 7px; }
+.custom-range .dash { color: var(--faint); font-size: 12px; }
+
+/* ── date field + its own calendar ──────────────────────────────────────
+   The browser's date input cannot be styled and refuses typed text, so this
+   is a plain text box with a calendar of our own beside it. */
+.datefield { position: relative; display: flex; align-items: center; }
+.datefield input {
+  width: 128px; padding: 6px 30px 6px 10px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--text); font-size: 12.5px;
+  outline: none; transition: border-color .15s, box-shadow .15s;
+}
+.datefield input::placeholder { color: var(--faint); }
+.datefield input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint); }
+.datefield input.bad { border-color: var(--danger); box-shadow: 0 0 0 3px var(--danger-tint); }
+.cal-btn {
+  position: absolute; right: 4px; display: grid; place-items: center;
+  width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px;
+  background: none; color: var(--faint); cursor: pointer; transition: color .15s, background .15s;
+}
+.cal-btn:hover { color: var(--accent); background: var(--accent-tint); }
+
+.cal {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 30; width: 268px;
+  padding: 12px; border: 1px solid var(--line); border-radius: var(--r-lg);
+  background: var(--surface); box-shadow: var(--shadow);
+  animation: cal-in .18s cubic-bezier(.2, .85, .3, 1);
+}
+@keyframes cal-in {
+  from { opacity: 0; transform: translateY(-6px) scale(.97); }
+  to { opacity: 1; transform: none; }
+}
+.cal-head {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;
+}
+.cal-pickers { display: flex; align-items: center; gap: 6px; }
+.cal-pick {
+  padding: 4px 24px 4px 8px; border: 1px solid transparent; border-radius: 7px;
+  background: none; color: var(--text); font-size: 13px; font-weight: 650;
+  letter-spacing: -.01em; cursor: pointer; appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+                    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 12px) 52%, calc(100% - 8px) 52%;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+  transition: background-color .14s, border-color .14s;
+}
+.cal-pick:hover { background-color: var(--accent-tint); border-color: var(--line); }
+.cal-pick:focus-visible { border-color: var(--accent); outline: none; }
+.cal-pick option { background: var(--surface); color: var(--text); font-weight: 500; }
+.cal-pick.year { padding-right: 22px; }
+.cal-nav {
+  width: 26px; height: 26px; border-radius: 7px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--muted); cursor: pointer;
+  font-size: 15px; line-height: 1; display: grid; place-items: center;
+  transition: background .14s, color .14s, border-color .14s;
+}
+.cal-nav:hover { background: var(--accent-tint); color: var(--accent); border-color: var(--accent); }
+
+.cal-week, .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.cal-name {
+  text-align: center; font-size: 10.5px; font-weight: 700; letter-spacing: .04em;
+  color: var(--faint); padding-bottom: 5px;
+}
+.cal-day {
+  aspect-ratio: 1; border: 0; border-radius: 8px; background: none; cursor: pointer;
+  color: var(--text); font-size: 12.5px; font-variant-numeric: tabular-nums;
+  display: grid; place-items: center;
+  transition: background .13s, color .13s, transform .13s;
+}
+.cal-day:hover { background: var(--accent-tint); color: var(--accent); transform: scale(1.06); }
+.cal-day.outside { color: var(--faint); opacity: .6; }
+.cal-day.today { box-shadow: inset 0 0 0 1px var(--accent); color: var(--accent); font-weight: 650; }
+.cal-day.picked {
+  background: var(--accent); color: var(--on-accent); font-weight: 650; box-shadow: none;
+}
+.cal-day.picked:hover { background: var(--accent); color: var(--on-accent); }
+
+.cal-foot {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line-soft);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cal { animation: none; }
+  .cal-day:hover { transform: none; }
+}
+
+.inline-field { display: flex; align-items: center; gap: 7px; }
+.inline-field > span { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--faint); }
+.inline-field select { padding: 5px 9px; font-size: 12.5px; min-width: 110px; }
+
+.row-cap {
+  padding: 10px 16px; font-size: 12.5px; color: var(--muted);
+  border-top: 1px solid var(--line-soft); background: var(--surface-2); text-align: center;
+}
+
+.import-note {
+  padding: 11px 14px; font-size: 12.5px; line-height: 1.55;
+  border-radius: var(--r-sm); background: var(--accent-tint); color: var(--accent);
+}
+/* A note about how the sheet was read is not a failure, so it is not red. */
+.import-note.warn { background: var(--warn-tint); color: var(--warn); }
+.import-note.error { background: var(--danger-tint); color: var(--danger); }
+
+/* ═══ toolbar ════════════════════════════════════════════════════════════ */
+
+.toolbar { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; min-height: 38px; }
+.search {
+  display: flex; align-items: center; gap: 8px; flex: 1 1 200px; max-width: 320px;
+  padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--surface); color: var(--faint);
+}
+.search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint); }
+.search svg { flex: 0 0 auto; }
+.search input { border: 0; outline: none; background: none; width: 100%; min-width: 0; color: var(--text); }
+.search input::placeholder { color: var(--faint); }
+
+select {
+  padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--surface); cursor: pointer; font-size: 13px; line-height: 1.4;
+}
+.selection-note { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+
+/* The company picker: a long list of names next to its own commit button. */
+.company-pick { display: flex; gap: 10px; align-items: center; margin: 4px 0 16px; flex-wrap: wrap; }
+.company-pick select { flex: 1 1 320px; min-width: 0; transition: border-color .25s, box-shadow .25s; }
+
+/* Typing the path by hand: for a company this machine cannot scan, because it
+   lives on another one. Folded away, since the list answers the usual case. */
+.company-manual { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+.company-manual summary {
+  cursor: pointer; font-size: 13px; font-weight: 600; color: var(--accent);
+  list-style: none; display: inline-flex; align-items: center; gap: 7px;
+}
+.company-manual summary::-webkit-details-marker { display: none; }
+.company-manual summary::before {
+  content: ""; width: 6px; height: 6px; flex: none;
+  border-right: 1.6px solid currentColor; border-bottom: 1.6px solid currentColor;
+  transform: rotate(-45deg); transition: transform .2s ease;
+}
+.company-manual[open] summary::before { transform: rotate(45deg); }
+.company-manual .company-pick { margin-bottom: 6px; }
+.company-manual input {
+  flex: 1 1 320px; min-width: 0; padding: 9px 11px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+  font-size: 13px; font-family: var(--mono, ui-monospace, monospace);
+  transition: border-color .25s, box-shadow .25s;
+}
+.company-manual input:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .company-manual summary::before { transition: none; }
+}
+
+/* ═══ the sheet-link lock ════════════════════════════════════════════════
+   Every row on the dashboard arrives through this one link, so it is kept
+   shut until somebody means to change it. */
+
+.lock-btn { display: inline-flex; align-items: center; gap: 6px; }
+
+/* A padlock drawn in CSS: a body, and a shackle that swings open. */
+.lock-mark {
+  position: relative; width: 11px; height: 9px; border-radius: 2px;
+  background: currentColor; margin-top: 4px; flex: 0 0 auto;
+}
+.lock-mark::before {
+  content: ""; position: absolute; left: 1.5px; bottom: 100%;
+  width: 8px; height: 6px; border: 1.6px solid currentColor; border-bottom: 0;
+  border-radius: 5px 5px 0 0;
+  transition: transform .22s ease, left .22s ease;
+  transform-origin: bottom right;
+}
+/* Unlocked: the shackle lifts and tips to one side. */
+.lockable:not(.locked) .lock-mark::before { transform: rotate(28deg) translateY(-1px); left: 4px; }
+.lockable:not(.locked) .lock-btn { color: var(--accent); border-color: var(--accent); }
+
+/* Locked: the controls are visibly out of reach, not merely inert. */
+.lockable.locked .source-set { opacity: .55; }
+.lockable.locked .source-set input { cursor: not-allowed; background: var(--surface-2); }
+.source-set input:disabled, .source-set input:disabled::placeholder { color: var(--muted); }
+.lockable .source-set { transition: opacity .25s; }
+
+/* A moment's highlight as it opens, so the change is not missed. */
+.lockable:not(.locked) .source-set input { animation: lock-opened .5s ease-out; }
+@keyframes lock-opened {
+  from { box-shadow: 0 0 0 4px var(--accent-tint); }
+  to   { box-shadow: 0 0 0 0 transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lock-mark::before { transition: none; }
+  .lockable:not(.locked) .source-set input { animation: none; }
+}
+
+/* The sheet link: long enough that it needs the whole row to itself. */
+.source-set { display: flex; gap: 10px; align-items: center; margin: 4px 0 14px; flex-wrap: wrap; }
+.source-set input {
+  flex: 1 1 420px; min-width: 0; padding: 9px 11px; font-size: 12.5px;
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--surface); color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-overflow: ellipsis;
+}
+.source-set input:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
+
+/* Aimed at one company while QuickBooks serves another: nothing can be sent,
+   so this is stated plainly instead of being inferred from two small tags. */
+.company-warn {
+  margin: 10px 0 0; padding: 11px 13px; border-radius: var(--r-sm);
+  background: var(--warn-tint); border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--line));
+  color: var(--warn); font-size: 12.5px; line-height: 1.55; font-weight: 500;
+}
+.company-warn[hidden] { display: none; }
+
+/* Scanning: a light sweeps along the list while the folders are read. */
+.company-pick.scanning select {
+  color: var(--muted); pointer-events: none; border-color: var(--accent);
+  background-image: linear-gradient(
+    100deg, transparent 15%, var(--accent-tint) 42%, var(--accent-tint) 58%, transparent 85%);
+  background-size: 260% 100%;
+  animation: company-sweep 1s linear infinite;
+}
+@keyframes company-sweep {
+  from { background-position: 130% 0; }
+  to   { background-position: -130% 0; }
+}
+
+/* And a single pulse as the finished list lands. */
+.company-pick select.just-scanned { animation: company-settled .55s ease-out; }
+@keyframes company-settled {
+  0%   { box-shadow: 0 0 0 0 var(--accent-tint); border-color: var(--accent); }
+  60%  { box-shadow: 0 0 0 5px var(--accent-tint); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .company-pick.scanning select,
+  .company-pick select.just-scanned { animation: none; }
+}
+
+/* ═══ tables ═════════════════════════════════════════════════════════════ */
+
+.table-wrap {
+  border: 1px solid var(--line); border-radius: 18px;
+  overflow: hidden; background: var(--surface); box-shadow: var(--shadow);
+}
+.grid { width: 100%; border-collapse: collapse; table-layout: auto; }
+
+.grid thead th {
+  text-align: left; padding: 11px 16px; white-space: nowrap;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--faint); background: var(--surface-2); border-bottom: 1px solid var(--line);
+}
+.grid tbody td {
+  padding: 12px 16px; border-bottom: 1px solid var(--line-soft);
+  vertical-align: top; font-size: 13px; line-height: 1.5;
+}
+.grid tbody tr:last-child td { border-bottom: 0; }
+.grid tbody tr { transition: background .16s ease, transform .16s ease; }
+.grid tbody tr:hover { background: var(--surface-2); }
+/* Done rows are NOT faded: the green "Created" badge already says so, and
+   fading the row dimmed its badge and buttons with it (opacity applies to
+   every descendant and a child cannot opt back out). */
+
+.grid th.check, .grid td.check { width: 44px; padding-right: 0; }
+.grid th.fit, .grid td.fit { width: 1%; white-space: nowrap; }
+.grid th.money, .grid td.money {
+  text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; width: 1%;
+}
+
+input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; margin: 1px 0 0; }
+input[type=checkbox]:disabled { cursor: not-allowed; }
+
+.strong { font-weight: 600; }
+.sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.sub:empty { display: none; }
+.why { font-size: 12px; margin-top: 5px; color: var(--warn); line-height: 1.5; }
+.why.error { color: var(--danger); }
+.mono { font-variant-numeric: tabular-nums; }
+
+.tag {
+  display: inline-block; padding: 3px 10px; border-radius: 999px;
+  font-size: 11.5px; font-weight: 600; white-space: nowrap; line-height: 1.5;
+  background: var(--line-soft); color: var(--muted); letter-spacing: .01em;
+  transition: background-color .2s ease, color .2s ease;
+}
+.tag.ready { background: var(--danger-tint); color: var(--danger); }
+/* Two spellings of the same thing: "review" is what the app works out from the
+   row, "needs_review" is what the history and the sheet call it. Both are the
+   same amber, or a badge loses its colour depending on where it came from. */
+.tag.review,
+.tag.needs_review { background: var(--warn-tint); color: var(--warn); }
+/* Created and Already there both mean the work is in QuickBooks, so both are
+   green - the difference is who put it there, not whether it is done. */
+.tag.completed,
+.tag.already_exists { background: var(--good-tint); color: var(--good); }
+.tag.simulated { background: var(--warn-tint); color: var(--warn); }
+.tag.failed { background: var(--danger-tint); color: var(--danger); }
+/* While a batch runs: the row being worked on, and the ones behind it. */
+.tag.sending {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--accent-tint); color: var(--accent);
+}
+.tag.queued { background: var(--line-soft); color: var(--faint); }
+/* Deliberately grey and quiet: settled, but nothing was done and nothing is
+   owed. It must not read as success, nor as something still to chase. */
+.tag.not_needed {
+  background: transparent; color: var(--faint);
+  border: 1px dashed var(--line); font-weight: 500;
+}
+.tag.paid { background: var(--good-tint); color: var(--good); }
+.tag.open { background: var(--warn-tint); color: var(--warn); }
+
+/* ═══ empty / loading states ═════════════════════════════════════════════ */
+
+/* The sheet view is deliberately wide - scroll it rather than squashing columns.
+   Capping the height keeps the horizontal scrollbar on screen instead of
+   stranding it below hundreds of rows. */
+.sheet-scroll {
+  overflow: auto;
+  max-height: calc(100vh - 290px);
+  min-height: 340px;
+  overscroll-behavior-x: contain;
+}
+/* Focusable so it can be tabbed to, but no focus ring on mouse click - the
+   arrow keys work whether or not it is focused. */
+.sheet-scroll:focus { outline: none; }
+.sheet-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.sheet-scroll::-webkit-scrollbar { height: 12px; width: 12px; }
+.sheet-scroll::-webkit-scrollbar-track { background: var(--surface-2); }
+.sheet-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted) 45%, transparent);
+  border-radius: 999px; border: 3px solid var(--surface-2);
+}
+.sheet-scroll::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+/* Fills a wide screen, scrolls on a narrow one. */
+.sheet-grid { min-width: 2000px; width: 100%; }
+
+/* Rows read across, so centre every cell on one baseline rather than hanging from the top. */
+.sheet-grid tbody td { vertical-align: middle; padding: 9px 14px; }
+.sheet-grid thead th { padding: 10px 14px; }
+.sheet-grid td, .sheet-grid th { white-space: nowrap; }
+
+/* One background per row, driven by a variable, so the pinned columns match
+   the stripe and the hover without repeating every rule. */
+.sheet-grid tbody tr { --row-bg: var(--surface); }
+.sheet-grid tbody tr:nth-child(even) { --row-bg: var(--surface-2); }
+.sheet-grid tbody tr:hover { --row-bg: var(--accent-tint); }
+.sheet-grid tbody td { background: var(--row-bg); border-bottom: 0; }
+/* Zebra separates the rows, so the header needs the only hard line. */
+.sheet-grid thead th { border-bottom: 1px solid var(--line); font-weight: 650; }
+
+/* The checkbox, pencil and Corporation Name stay put while the rest scrolls. */
+.sheet-grid th.check, .sheet-grid td.check {
+  position: sticky; left: 0; z-index: 2;
+  width: 76px; min-width: 76px; white-space: nowrap;
+}
+.sheet-grid td.check > * { vertical-align: middle; }
+.sheet-grid th.sticky-col, .sheet-grid td.sticky-col {
+  position: sticky; left: 76px; z-index: 2;
+  min-width: 260px; max-width: 300px;
+  white-space: normal; line-height: 1.4; font-weight: 500;
+  box-shadow: 1px 0 0 var(--line);
+}
+.sheet-grid thead th.check, .sheet-grid thead th.sticky-col { z-index: 4; }
+.sheet-grid thead th { position: sticky; top: 0; z-index: 3; background: var(--surface-2); }
+.sheet-grid td.wide, .sheet-grid th.wide { white-space: normal; min-width: 230px; }
+.sheet-grid td.check { vertical-align: middle; cursor: default; }
+
+/* Rows rise into place when a filter changes what is listed - tilted back in
+   3D, then settling flat, staggered so the table assembles rather than snaps.
+
+   fill-mode is `backwards`, NOT `both`, and that matters: a transform left on
+   a <tr> creates a containing block that breaks the sticky first column.
+   `backwards` applies the start frame during the delay but leaves no transform
+   behind once the animation ends, so sticky works again the moment it lands. */
+@keyframes row-enter {
+  from {
+    opacity: 0;
+    transform: perspective(900px) rotateX(-7deg) translateY(16px) scale(.994);
+  }
+  to {
+    opacity: 1;
+    transform: perspective(900px) rotateX(0deg) translateY(0) scale(1);
+  }
+}
+.sheet-grid tbody tr.row-enter {
+  animation: row-enter .4s cubic-bezier(.21, .68, .32, 1) backwards;
+  transform-origin: center top;
+  will-change: transform, opacity;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sheet-grid tbody tr.row-enter { animation: none; }
+}
+
+/* Drag a header to move that column. Corporation Name has no .movable class,
+   so it stays pinned where it is. */
+.sheet-grid thead th.movable { cursor: grab; user-select: none; touch-action: none; }
+.sheet-grid thead th.movable:active { cursor: grabbing; }
+/* While a column is being dragged, stop the rest of the page selecting text. */
+body.dragging-column { user-select: none; cursor: grabbing; }
+.sheet-grid thead th.movable:hover { color: var(--accent); background: var(--accent-tint); }
+/* The whole column lifts while it is being carried - header and every cell,
+   so it reads as one object rather than a floating header. */
+.sheet-grid th.col-dragging,
+.sheet-grid tbody td.col-dragging {
+  background: var(--accent-tint);
+  opacity: .6;
+}
+.sheet-grid th.col-dragging { color: var(--accent); }
+
+/* A single clean line on the edge the column will land against. */
+.sheet-grid th.col-drop-before,
+.sheet-grid tbody td.col-drop-before { box-shadow: inset 2px 0 0 var(--accent); }
+.sheet-grid th.col-drop-after,
+.sheet-grid tbody td.col-drop-after { box-shadow: inset -2px 0 0 var(--accent); }
+
+/* Ease the tint in and out, but never the drop line: that must track the
+   pointer instantly or it lags behind where you actually are. */
+.sheet-grid th, .sheet-grid tbody td { transition: background-color .12s ease, opacity .12s ease; }
+
+/* The whole row opens the editor, so show it is clickable. */
+.sheet-grid tbody tr { cursor: pointer; }
+.sheet-grid tbody tr:hover td.sticky-col { color: var(--accent); }
+
+/* Pencil / save / cancel buttons in the row's corner. */
+.row-btn {
+  width: 22px; height: 22px; margin-left: 5px; padding: 0;
+  display: inline-grid; place-items: center; vertical-align: middle;
+  border: 1px solid transparent; border-radius: 6px;
+  background: transparent; color: var(--faint); cursor: pointer;
+  opacity: 0; transition: opacity .12s, background .12s, color .12s;
+}
+tbody tr:hover .row-btn,
+tbody tr:focus-within .row-btn,
+tbody tr.editing .row-btn { opacity: 1; }
+.row-btn:focus-visible { opacity: 1; }
+.row-btn:hover { background: var(--line-soft); color: var(--text); }
+.row-btn.save { color: var(--good); opacity: 1; }
+.row-btn.save:hover { background: var(--good-tint); }
+.row-btn.cancel { color: var(--danger); opacity: 1; }
+.row-btn.cancel:hover { background: var(--danger-tint); }
+
+/* ═══ dialogs ════════════════════════════════════════════════════════════ */
+
+#editDialog, #invoiceDialog, #askDialog, #customerDialog {
+  border: 1px solid var(--line); border-radius: var(--r-lg); padding: 0;
+  max-height: min(88vh, 900px);
+  background: var(--surface); color: var(--text); box-shadow: var(--shadow);
+}
+#editDialog { width: min(860px, calc(100% - 32px)); }
+/* The picker holds two or three choices, so it stays small. */
+#invoiceDialog { width: min(440px, calc(100% - 32px)); border-radius: var(--r-lg); }
+#askDialog { width: min(430px, calc(100% - 32px)); }
+
+#editDialog::backdrop,
+#invoiceDialog::backdrop,
+#askDialog::backdrop,
+#customerDialog::backdrop { background: rgba(10, 20, 16, .5); backdrop-filter: blur(2px); }
+
+/* Both pop in rather than appearing, so the eye follows them. */
+#editDialog[open], #invoiceDialog[open], #askDialog[open], #customerDialog[open] {
+  animation: dialog-in .24s cubic-bezier(.16, 1, .3, 1);
+}
+#editDialog[open]::backdrop, #invoiceDialog[open]::backdrop,
+#askDialog[open]::backdrop, #customerDialog[open]::backdrop {
+  animation: backdrop-in .24s ease;
+}
+
+/* A modal takes focus on open, and the browser then rings the whole box. */
+#editDialog:focus, #invoiceDialog:focus,
+#askDialog:focus, #customerDialog:focus { outline: none; }
+
+/* ── the app's own alert / confirm ── */
+#askForm { display: flex; flex-direction: column; }
+.ask-head { display: flex; align-items: flex-start; gap: 13px; padding: 20px 20px 4px; }
+.ask-icon {
+  flex: 0 0 auto; width: 34px; height: 34px; border-radius: 50%;
+  display: grid; place-items: center; font-size: 17px; font-weight: 700; line-height: 1;
+}
+.ask-icon.warn { background: var(--warn-tint); color: var(--warn); }
+.ask-icon.danger { background: var(--danger-tint); color: var(--danger); }
+.ask-icon.ask { background: var(--accent-tint); color: var(--accent); }
+.ask-head h2 { font-size: 15.5px; font-weight: 650; letter-spacing: -.01em; line-height: 1.35; }
+.ask-head p { font-size: 13px; color: var(--muted); margin-top: 5px; line-height: 1.5; }
+.ask-head p:empty { display: none; }
+
+.ask-body { padding: 14px 20px 0; }
+.ask-body[hidden] { display: none; }
+.ask-detail {
+  padding: 10px 12px; border-radius: var(--r-sm); font-size: 12px; line-height: 1.5;
+  background: var(--surface-2); border: 1px solid var(--line);
+  color: var(--text); word-break: break-word; white-space: pre-line;
+}
+#askForm .edit-foot { margin-top: 16px; flex-wrap: wrap; justify-content: flex-end; }
+#askForm .edit-foot .muted { flex: 1 0 100%; order: -1; font-size: 12px; }
+#askForm .edit-foot .muted:empty { display: none; }
+@keyframes dialog-in {
+  from { opacity: 0; transform: translateY(10px) scale(.94); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  #editDialog[open], #invoiceDialog[open], #customerDialog[open],
+  #editDialog[open]::backdrop, #invoiceDialog[open]::backdrop,
+  #customerDialog[open]::backdrop { animation: none; }
+}
+
+#editForm, #invoiceForm { display: flex; flex-direction: column; max-height: inherit; }
+
+.edit-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 14px;
+  padding: 18px 20px 14px; border-bottom: 1px solid var(--line);
+}
+.edit-title h2 { font-size: 16px; font-weight: 650; letter-spacing: -.01em; line-height: 1.35; }
+.edit-title p { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
+.edit-title p:empty { display: none; }
+
+.edit-warning {
+  margin: 14px 20px 0; padding: 11px 13px; border-radius: var(--r-sm);
+  background: var(--warn-tint); color: var(--warn); font-size: 12.5px; line-height: 1.5;
+}
+
+/* the invoice column stacks one badge per kind of invoice */
+td[data-key="__invoice"] { white-space: nowrap; }
+td[data-key="__invoice"] .tag { display: block; margin-bottom: 3px; text-align: center; }
+
+/* Light <-> dark. The browser cross-fades a picture of the whole page, so the
+   cost is one compositor animation no matter how much is on screen - the page
+   below can hold two hundred log entries and it makes no difference. Only the
+   duration is set here; everything else is the browser's own default. */
+/* Held only while the cross-fade runs: the page beneath changes colour in one
+   frame, so nothing animates twice. */
+.theme-instant,
+.theme-instant *,
+.theme-instant *::before,
+.theme-instant *::after {
+  transition: none !important;
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: .3s;
+  animation-timing-function: ease;
+  mix-blend-mode: normal;   /* plain cross-fade; the default blend muddies text */
+}
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) { animation: none; }
+}
+
+/* A row that has just finished, held on a filter it no longer matches so the
+   result can be read. First it settles - a brief green wash saying "done" -
+   then it fades and slides away on its own. */
+.sheet-grid tbody tr.row-settled td {
+  animation: row-settle .65s ease-out;
+}
+@keyframes row-settle {
+  0%   { background-color: var(--good-tint); }
+  55%  { background-color: var(--good-tint); }
+  100% { background-color: transparent; }
+}
+
+/* Opacity and transform only, so the whole row leaves on the compositor
+   rather than forcing a layout on every frame. */
+.sheet-grid tbody tr.row-leaving {
+  animation: row-leave .34s cubic-bezier(.4, 0, 1, 1) forwards;
+  pointer-events: none;
+  will-change: opacity, transform;
+}
+@keyframes row-leave {
+  from { opacity: 1; transform: none; }
+  to   { opacity: 0; transform: translateX(22px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet-grid tbody tr.row-settled { animation: none; }
+  .sheet-grid tbody tr.row-leaving { animation: none; opacity: 0; }
+}
+
+/* A status another dashboard set, read back from the sheet. Just the arrow:
+   an outline as well washed the colour out of every badge it touched, and the
+   status is the news - where it came from is a footnote. */
+.sheet-mark { margin-left: 4px; opacity: .6; font-weight: 700; font-size: .92em; }
+
+/* A log entry arriving while the work runs. Only new ones carry this class,
+   so the rest of the list stays still underneath. */
+.log.just-in, .act.just-in { animation: log-arrive .42s cubic-bezier(.2, .7, .3, 1); }
+@keyframes log-arrive {
+  from { opacity: 0; transform: translateY(-7px); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .log.just-in, .act.just-in { animation: none; }
+}
+
+/* the bulk editor: one row per field, ticked to take effect */
+.bulk-hint { padding: 0 20px; margin: 12px 0 0; font-size: 12.5px; }
+.bulk-fields {
+  display: grid; gap: 4px; padding: 12px 20px 0; overflow-y: auto; max-height: 52vh;
+}
+.bulk-field {
+  display: grid; grid-template-columns: 18px 150px 1fr; gap: 12px; align-items: center;
+  padding: 7px 9px; border-radius: var(--r-sm); cursor: pointer;
+  border: 1px solid transparent; transition: background .14s, border-color .14s;
+}
+.bulk-field:hover { background: var(--surface-2); }
+.bulk-field.is-on { background: var(--accent-tint); border-color: var(--accent); }
+.bulk-label { font-size: 12.5px; font-weight: 600; }
+.bulk-field input[type="text"] {
+  padding: 7px 10px; font-size: 12.5px; min-width: 0;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); color: var(--text);
+}
+.bulk-field input[type="text"]:disabled { background: var(--surface-2); cursor: not-allowed; }
+.bulk-field input[type="text"]:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint);
+}
+
+/* the invoice picker: one card per kind of invoice */
+.invoice-choices { display: grid; gap: 10px; padding: 16px 20px; overflow-y: auto; }
+.invoice-choice {
+  display: flex; align-items: flex-start; gap: 12px; padding: 13px 15px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface);
+  transition: border-color .16s ease, background .16s ease, box-shadow .16s ease;
+}
+.invoice-choice:hover { border-color: var(--accent); }
+.invoice-choice.selected { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint); }
+
+/* Marked as not needed: greyed out, but still legible and still reversible. */
+.invoice-choice.is-skipped {
+  background: var(--surface-2); border-style: dashed; cursor: default;
+}
+.invoice-choice.is-skipped:hover { border-color: var(--line); }
+.invoice-choice.is-skipped strong { color: var(--muted); font-weight: 600; }
+.invoice-choice.is-skipped input { opacity: .4; }
+.invoice-choice strong { display: flex; align-items: center; gap: 8px; }
+
+/* The "Not needed" / "Need it after all" link on each card. */
+.skip-link {
+  margin-left: auto; align-self: center; flex: 0 0 auto;
+  font-size: 11.5px; white-space: nowrap;
+  background: none; border: 0; padding: 4px 2px; cursor: pointer;
+}
+.skip-link:disabled { opacity: .5; cursor: wait; }
+.invoice-choice:has(input:disabled) { opacity: .55; cursor: not-allowed; }
+.invoice-choice input { margin-top: 3px; accent-color: var(--accent); }
+.invoice-choice > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.invoice-choice strong { font-size: 13.5px; }
+.invoice-choice .muted { font-size: 12px; line-height: 1.45; }
+
+#customerForm { display: flex; flex-direction: column; max-height: inherit; }
+#customerDialog { width: min(620px, calc(100% - 32px)); }
+
+/* The header reads as a question, with the magnifier saying where the answer
+   was looked for. */
+.customer-head { align-items: center; padding-bottom: 16px; }
+.customer-mark {
+  flex: none; width: 36px; height: 36px; border-radius: 11px;
+  display: grid; place-items: center;
+  background: var(--accent-tint); color: var(--accent);
+}
+.customer-hint {
+  padding: 0 20px; margin: 14px 0 0; font-size: 12.5px;
+}
+/* Rows are sized by their own content and the list scrolls. Left as a plain
+   grid, several cards at once were squeezed to share the box's height, and
+   because a card hides its overflow that cut every one of them off below the
+   name - a dialog full of policies with nothing to click. */
+.customer-resolver {
+  display: grid;
+  grid-auto-rows: min-content;
+  align-content: start;
+  gap: 14px;
+  padding: 14px 20px 18px;
+  max-height: min(62vh, 620px);
+  overflow-y: auto;
+}
+.customer-row {
+  min-height: 0;
+  border: 1px solid var(--line); border-radius: 14px; overflow: hidden;
+  background: var(--surface); box-shadow: var(--shadow);
+  transition: border-color .2s, box-shadow .2s;
+}
+/* A card with its answer in goes quiet, so the eye lands on the ones left. */
+.customer-row.chosen { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.customer-row.chosen .customer-row-head { background: var(--accent-tint); }
+.customer-row.chosen .customer-step { background: var(--accent); }
+
+.customer-row-head {
+  display: flex; align-items: center; gap: 11px;
+  padding: 13px 15px; background: var(--surface-2);
+  border-bottom: 1px solid var(--line); transition: background .2s;
+}
+.customer-step {
+  flex: none; width: 22px; height: 22px; border-radius: 7px;
+  display: grid; place-items: center; font-size: 11px; font-weight: 700;
+  background: var(--muted); color: var(--surface); transition: background .2s;
+}
+.customer-naming { min-width: 0; }
+.customer-row-head strong {
+  display: block; font-size: 14px; line-height: 1.3; letter-spacing: -.01em;
+}
+.customer-facts { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.customer-chip {
+  font-size: 10.5px; color: var(--muted); padding: 3px 8px; border-radius: 999px;
+  background: var(--surface); border: 1px solid var(--line); white-space: nowrap;
+  letter-spacing: .01em;
+}
+
+.customer-options { display: grid; gap: 0; padding: 8px; }
+.customer-legend {
+  padding: 7px 10px 9px; font-size: 11px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .06em; font-weight: 600;
+}
+
+/* Why this row stopped. Stated as a finding, not an error - the search ran,
+   and this is what came back. Amber only when there is nothing to choose
+   from, because then the answer really is "it is not in QuickBooks". */
+.customer-note {
+  display: flex; gap: 10px; align-items: flex-start;
+  margin: 2px 2px 10px; padding: 11px 12px; border-radius: 9px;
+  background: var(--surface-2); color: var(--text);
+  font-size: 12px; line-height: 1.55;
+}
+.customer-note-mark {
+  flex: none; width: 17px; height: 17px; border-radius: 50%; margin-top: 1px;
+  display: grid; place-items: center; font-size: 11px; font-weight: 700;
+  background: var(--muted); color: var(--surface);
+}
+.customer-note-text { min-width: 0; }
+.customer-note.none { background: var(--warn-tint); color: var(--warn); }
+.customer-note.none .customer-note-mark { background: var(--warn); }
+
+/* Each answer is a card you click anywhere on, with the radio drawn rather
+   than left to the browser - the native one is tiny and sits badly next to a
+   two-line label. */
+.customer-option {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 11px 12px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  cursor: pointer;
+  font-size: 12.5px;
+  transition: background .15s, border-color .15s;
+}
+.customer-option + .customer-option { margin-top: 2px; }
+.customer-option:hover { background: var(--accent-tint); }
+.customer-option:has(input:checked) {
+  background: var(--accent-tint);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.customer-option input {
+  position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none;
+}
+.customer-option::before {
+  content: ""; flex: none; width: 16px; height: 16px; margin-top: 1px;
+  border-radius: 50%; border: 1.6px solid var(--line); background: var(--surface);
+  transition: border-color .15s, box-shadow .15s;
+}
+.customer-option:has(input:checked)::before {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 3.5px var(--surface), inset 0 0 0 9px var(--accent);
+}
+.customer-option:has(input:focus-visible)::before {
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
+.customer-option:has(input:checked:focus-visible)::before {
+  box-shadow: inset 0 0 0 3.5px var(--surface), inset 0 0 0 9px var(--accent),
+              0 0 0 3px var(--accent-tint);
+}
+.customer-option-name { min-width: 0; overflow-wrap: anywhere; line-height: 1.45; }
+.customer-option:has(input:checked) .customer-option-name { font-weight: 600; }
+
+/* Creating a customer is the one choice here that cannot be taken back, so it
+   is set below the matches behind a rule, not offered as another of them. */
+.customer-option.create-new {
+  margin-top: 8px; padding-top: 14px;
+  border-top: 1px dashed var(--line); border-radius: 0 0 9px 9px;
+  color: var(--danger);
+}
+.customer-option.create-new:hover,
+.customer-option.create-new:has(input:checked) {
+  background: var(--danger-tint); border-color: transparent;
+  border-top-color: color-mix(in srgb, var(--danger) 40%, var(--line));
+}
+.customer-option.create-new::before { margin-top: 2px; }
+.customer-option.create-new:has(input:checked)::before {
+  border-color: var(--danger);
+  box-shadow: inset 0 0 0 3.5px var(--surface), inset 0 0 0 9px var(--danger);
+}
+.customer-create-label { font-weight: 600; }
+.customer-create-name {
+  font-size: 11.5px; margin-top: 3px; font-weight: 400;
+  color: color-mix(in srgb, var(--danger) 72%, var(--muted));
+}
+
+/* How much of the list is answered, without counting cards. */
+.customer-foot { position: relative; }
+.customer-progress {
+  position: absolute; inset: 0 0 auto 0; height: 3px;
+  background: var(--line); overflow: hidden;
+}
+.customer-progress-bar {
+  display: block; height: 100%; width: 0;
+  background: var(--accent); transition: width .3s ease;
+}
+.customer-progress.complete .customer-progress-bar { background: var(--ok, var(--accent)); }
+
+/* Shown between the click and the picker: looking a name up in QuickBooks
+   takes seconds, and silence reads as a click that did nothing. */
+.lookup-sweep {
+  position: fixed; left: 50%; bottom: 26px; transform: translate(-50%, 12px);
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 18px; border-radius: 999px; z-index: 60;
+  background: var(--surface); border: 1px solid var(--line);
+  box-shadow: var(--shadow); font-size: 12.5px;
+  opacity: 0; transition: opacity .25s ease, transform .25s ease;
+  pointer-events: none;
+}
+.lookup-sweep.in { opacity: 1; transform: translate(-50%, 0); }
+.lookup-dot {
+  width: 13px; height: 13px; flex: none; border-radius: 50%;
+  border: 2px solid var(--accent-tint); border-top-color: var(--accent);
+  animation: lookup-spin .7s linear infinite;
+}
+.lookup-text { position: relative; }
+@keyframes lookup-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .lookup-sweep { transition: none; }
+  .lookup-dot { animation-duration: 2s; }
+  .customer-progress-bar { transition: none; }
+}
+
+.edit-grid {
+  display: grid; gap: 12px 16px; padding: 16px 20px;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  overflow-y: auto;
+}
+.edit-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.edit-field.wide { grid-column: 1 / -1; }
+.edit-field > span {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 11px; font-weight: 700; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--faint);
+}
+.field-hint {
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  font-size: 11.5px; color: var(--muted); margin-top: 1px;
+}
+.field-hint .linky { font-size: 11.5px; }
+
+/* Brief green pulse when a field recalculates itself. */
+.cell-input.flash {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+  transition: background .1s, border-color .1s;
+}
+
+.edited-mark {
+  font-size: 9.5px; font-weight: 700; letter-spacing: .04em;
+  padding: 1px 6px; border-radius: 999px;
+  background: var(--accent-tint); color: var(--accent); text-transform: uppercase;
+}
+
+.edit-foot {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 14px 20px; border-top: 1px solid var(--line); background: var(--surface-2);
+}
+.edit-foot .muted { font-size: 12px; }
+/* Too narrow to sit the note beside the buttons, so it takes its own line. */
+#invoiceForm .edit-foot { justify-content: flex-end; }
+#invoiceForm .edit-foot .spacer { display: none; }
+#invoiceForm .edit-foot .muted { flex: 1 0 100%; order: -1; }
+
+.cell-input {
+  width: 100%; min-width: 110px; padding: 5px 7px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface); color: var(--text); font: inherit;
+  outline: none;
+}
+.cell-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-tint); }
+
+/* The status badge carries its reason in a tooltip, so rows stay one line tall. */
+.tag[title] { cursor: help; }
+
+.empty, .state-box { padding: 48px 24px; text-align: center; }
+.state-box:empty { display: none; }
+.empty-mark {
+  width: 44px; height: 44px; margin: 0 auto 12px; border-radius: 12px;
+  display: grid; place-items: center;
+  background: var(--surface-2); border: 1px solid var(--line); color: var(--faint);
+}
+.empty-title { font-weight: 650; margin-bottom: 3px; }
+
+.spinner {
+  width: 18px; height: 18px; margin: 0 auto 10px; border-radius: 50%;
+  border: 2px solid var(--line); border-top-color: var(--accent);
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2s; } }
+
+/* Inline spinner for a button mid-request - sits next to its own label. */
+.spinner-sm {
+  display: inline-block; width: 10px; height: 10px; margin-right: 5px;
+  border-radius: 50%; vertical-align: -1px;
+  border: 1.5px solid currentColor; border-top-color: transparent;
+  opacity: .7; animation: spin .6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) { .spinner-sm { animation-duration: 2s; } }
+
+/* Refresh policies: a circular arrow turning while the sheet is read, a
+   seconds count beside it (the load can take a minute or two), and one soft
+   pulse when it is done so the finish is not missed. */
+.refresh-icon {
+  position: relative; display: inline-block; width: 12px; height: 12px;
+  margin-right: 7px; vertical-align: -1px; border-radius: 50%;
+  border: 1.75px solid currentColor; border-right-color: transparent;
+  animation: spin .85s linear infinite;
+}
+.refresh-icon::after {         /* the arrowhead, riding the open end of the ring */
+  content: ""; position: absolute; top: -3px; right: -1px;
+  border: 3px solid transparent; border-left: 4px solid currentColor;
+  transform: rotate(-35deg);
+}
+.btn.refreshing {
+  color: var(--accent); border-color: var(--accent); background: var(--accent-tint);
+}
+.btn.refreshing:disabled { opacity: 1; }      /* busy, not unavailable */
+.refresh-time {
+  margin-left: 4px; font-variant-numeric: tabular-nums; opacity: .65; font-weight: 500;
+}
+.btn.just-refreshed { animation: refresh-done .7s ease-out; }
+@keyframes refresh-done {
+  0%   { box-shadow: 0 0 0 0 var(--accent-tint); border-color: var(--accent); }
+  50%  { box-shadow: 0 0 0 6px var(--accent-tint); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .refresh-icon { animation-duration: 2.4s; }
+  .btn.just-refreshed { animation: none; }
+}
+
+.mini-btn.is-busy, .btn.is-busy { cursor: wait; }
+.mini-btn.is-busy { color: var(--accent); border-color: var(--accent); background: var(--accent-tint); }
+
+/* ═══ activity ═══════════════════════════════════════════════════════════ */
+
+.activity { display: flex; flex-direction: column; }
+/* Entries must keep their own height: as flex children they would otherwise
+   shrink to fit the capped container and collapse into each other, instead of
+   the list scrolling. */
+.activity > * { flex: 0 0 auto; }
+.activity.tall {
+  flex: 1 1 auto; min-height: 240px; overflow-y: auto; padding-right: 4px;
+}
+.act {
+  display: flex; align-items: flex-start; gap: 11px;
+  padding: 11px 0; border-top: 1px solid var(--line-soft);
+}
+.act:first-child { border-top: 0; padding-top: 0; }
+.act .dot { width: 6px; height: 6px; border-radius: 50%; margin-top: 7px; flex: 0 0 auto; background: var(--faint); }
+.act.completed .dot { background: var(--good); }
+.act.failed .dot { background: var(--danger); }
+.act.needs_review .dot { background: var(--warn); }
+.act-body { min-width: 0; flex: 1 1 auto; }
+.act .when,
+.log .when {
+  font-size: 11.5px; color: var(--faint); white-space: nowrap; flex: 0 0 auto; padding-top: 1px;
+  display: flex; align-items: center;
+}
+.act-mode {
+  font-size: 10px; font-weight: 700; letter-spacing: .04em;
+  padding: 1px 6px; border-radius: 999px; margin-left: 8px; white-space: nowrap;
+}
+.act-mode.live { background: var(--danger-tint); color: var(--danger); }
+.act-mode.safe { background: var(--warn-tint); color: var(--warn); }
+
+/* Per-row Send / Update, under the status badge in the QB status column. */
+.row-actions { display: flex; gap: 5px; margin-top: 5px; }
+.mini-btn {
+  padding: 2px 8px; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--muted);
+  font-size: 10.5px; font-weight: 600; cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.mini-btn:hover { background: var(--accent-tint); color: var(--accent); border-color: var(--accent); }
+/* Acknowledges the press in the same frame as the click, before anything else
+   has run - so the button never feels like it missed it. */
+.mini-btn:active { transform: scale(.94); transition-duration: .04s; }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.act-empty { padding: 14px 0; color: var(--muted); font-size: 13px; }
+
+/* ═══ toast ══════════════════════════════════════════════════════════════ */
+
+.toast {
+  position: fixed; left: 50%; bottom: 28px; z-index: 20;
+  transform: translate(-50%, 14px); opacity: 0; pointer-events: none;
+  padding: 11px 18px; border-radius: 999px; font-size: 13px; font-weight: 500;
+  background: var(--text); color: var(--bg);
+  transition: opacity .2s, transform .2s; max-width: calc(100% - 32px);
+  box-shadow: 0 8px 28px -8px rgba(0, 0, 0, .4);
+}
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.error { background: var(--danger); color: var(--on-danger); }
+
+/* ═══ narrow screens ═════════════════════════════════════════════════════ */
+
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  .sidebar {
+    position: static; height: auto; flex-direction: row; align-items: center;
+    gap: 10px; overflow-x: auto; padding: 10px 14px;
+    border-right: 0; border-bottom: 1px solid var(--line);
+  }
+  /* Here the sidebar is a top strip and holds the only navigation, so
+     collapsing it would strand the user. Ignore the collapsed state. */
+  :root[data-sidebar="collapsed"] .layout { grid-template-columns: 1fr; }
+  :root[data-sidebar="collapsed"] .sidebar { padding: 10px 14px; overflow-x: auto; }
+  :root[data-sidebar="collapsed"] .sidebar > * { opacity: 1; pointer-events: auto; }
+  .sidebar-toggle { display: none; }
+  .side-brand { padding: 0; }
+  .side-brand-text { display: none; }
+  .nav { flex-direction: row; gap: 3px; }
+  .nav-label { display: none; }
+  .nav-item > span { display: none; }
+  .nav-item { padding: 9px 11px; }
+  .side-foot { margin: 0 0 0 auto; padding-top: 0; flex-direction: row; align-items: center; }
+  .link-line { display: none; }
+  .theme-toggle > span { display: none; }
+  .topbar { padding: 14px 16px; min-height: 0; }
+  .content { padding: 16px 16px 48px; }
+  .table-wrap { overflow-x: auto; }
+  .grid { min-width: 640px; }
+  .kv dt { flex: 0 0 120px; }
+  .kv > div { gap: 12px; }
+}
