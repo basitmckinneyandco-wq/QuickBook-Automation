@@ -1,0 +1,32 @@
+name: Publish QuickBooks app update to OneDrive
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    # Enable only after Microsoft credentials/permissions are configured.
+    if: ${{ vars.QB_ONEDRIVE_PUBLISH_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out committed source
+        uses: actions/checkout@v4
+
+      - name: Sign in to Microsoft Entra with GitHub OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Build and publish the app package
+        run: python scripts/publish_update.py
+        env:
+          QB_ONEDRIVE_USER: AbdulBasit@Mckinneyandcooo.onmicrosoft.com
+          QB_ONEDRIVE_FOLDER: Documents/Quickbook App Updates
