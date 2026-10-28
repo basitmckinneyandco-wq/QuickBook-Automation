@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -14,6 +14,12 @@ import urllib.request
 from pathlib import Path
 
 GRAPH = "https://graph.microsoft.com/v1.0"
+
+
+class GraphApiError(RuntimeError):
+    def __init__(self, status: int, detail: str):
+        super().__init__(f"Microsoft Graph returned HTTP {status}: {detail}")
+        self.status = status
 
 
 def graph_request(token: str, method: str, url: str, data: bytes | None = None) -> dict:
@@ -28,27 +34,8 @@ def graph_request(token: str, method: str, url: str, data: bytes | None = None) 
             body = response.read()
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Microsoft Graph returned HTTP {error.code}: {detail}") from error
+        raise GraphApiError(error.code, detail) from error
     return json.loads(body) if body else {}
-
-
-def upload_file(token: str, user: str, folder: str, name: str, content: bytes) -> dict:
-    user_path = urllib.parse.quote(user, safe="")
-    folder_path = "/".join(urllib.parse.quote(part, safe="") for part in folder.split("/"))
-    file_name = urllib.parse.quote(name, safe="")
-    url = f"{GRAPH}/users/{user_path}/drive/root:/{folder_path}/{file_name}:/content"
-    request = urllib.request.Request(
-        url,
-        data=content,
-        method="PUT",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/octet-stream"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            return json.loads(response.read())
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"OneDrive upload failed with HTTP {error.code}: {detail}") from error
 
 
 def token_roles(token: str) -> list[str]:
@@ -62,19 +49,63 @@ def token_roles(token: str) -> list[str]:
         raise RuntimeError("Could not inspect the Microsoft Graph token claims.") from error
 
 
-def verify_target_folder(token: str, user: str, folder: str) -> None:
+def resolve_target_folder(token: str, user: str, folder: str) -> tuple[str, str, str]:
+    """Resolve the OneDrive folder by its item ID, trying library and drive-root paths."""
+    candidates = [folder]
+    if folder.casefold().startswith("documents/"):
+        candidates.append(folder.split("/", 1)[1])
+    else:
+        candidates.append(f"Documents/{folder}")
+
     user_path = urllib.parse.quote(user, safe="")
-    folder_path = "/".join(urllib.parse.quote(part, safe="") for part in folder.split("/"))
-    graph_request(token, "GET", f"{GRAPH}/users/{user_path}/drive/root:/{folder_path}")
+    for candidate in candidates:
+        path = "/".join(urllib.parse.quote(part, safe="") for part in candidate.split("/"))
+        url = f"{GRAPH}/users/{user_path}/drive/root:/{path}"
+        try:
+            item = graph_request(token, "GET", url)
+        except GraphApiError as error:
+            if error.status == 404:
+                continue
+            raise
+        drive_id = item.get("parentReference", {}).get("driveId")
+        item_id = item.get("id")
+        if drive_id and item_id and "folder" in item:
+            return drive_id, item_id, candidate
+        raise RuntimeError(f"Found '{candidate}', but Graph did not return a folder ID and drive ID.")
+
+    raise RuntimeError(
+        "Graph could not find the update folder using either path "
+        f"'{candidates[0]}' or '{candidates[1]}'. Check that the folder is in the "
+        f"OneDrive for '{user}' and its name is exactly 'Quickbook App Updates'."
+    )
 
 
-def anyone_view_link(token: str, user: str, item_id: str) -> str:
-    user_path = urllib.parse.quote(user, safe="")
+def upload_file(token: str, drive_id: str, folder_id: str, name: str, content: bytes) -> dict:
+    drive_path = urllib.parse.quote(drive_id, safe="!")
+    folder_path = urllib.parse.quote(folder_id, safe="!")
+    file_name = urllib.parse.quote(name, safe="")
+    url = f"{GRAPH}/drives/{drive_path}/items/{folder_path}:/{file_name}:/content"
+    request = urllib.request.Request(
+        url,
+        data=content,
+        method="PUT",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/octet-stream"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise GraphApiError(error.code, detail) from error
+
+
+def anyone_view_link(token: str, drive_id: str, item_id: str) -> str:
+    drive_path = urllib.parse.quote(drive_id, safe="!")
     item_path = urllib.parse.quote(item_id, safe="")
     permission = graph_request(
         token,
         "POST",
-        f"{GRAPH}/users/{user_path}/drive/items/{item_path}/createLink",
+        f"{GRAPH}/drives/{drive_path}/items/{item_path}/createLink",
         json.dumps({"type": "view", "scope": "anonymous"}).encode("utf-8"),
     )
     try:
@@ -103,15 +134,8 @@ def main() -> None:
             f"(token roles: {role_list}). In Entra, add Microsoft Graph > Application permissions > "
             "Files.ReadWrite.All to the app identified by AZURE_CLIENT_ID, then grant admin consent."
         )
-    try:
-        verify_target_folder(token, user, folder)
-    except RuntimeError as error:
-        raise RuntimeError(
-            f"Graph has the upload role but cannot open OneDrive folder '{folder}' for '{user}'. "
-            "Confirm the folder is in that account's OneDrive and the path is correct. "
-            f"Graph detail: {error}"
-        ) from error
 
+    drive_id, folder_id, resolved_path = resolve_target_folder(token, user, folder)
     revision = subprocess.run(
         ["git", "rev-parse", "--short=12", "HEAD"], check=True, capture_output=True, text=True
     ).stdout.strip()
@@ -122,8 +146,8 @@ def main() -> None:
         )
         package = archive.read_bytes()
 
-    package_item = upload_file(token, user, folder, "latest.zip", package)
-    package_url = anyone_view_link(token, user, package_item["id"])
+    package_item = upload_file(token, drive_id, folder_id, "latest.zip", package)
+    package_url = anyone_view_link(token, drive_id, package_item["id"])
     manifest = {
         "version": revision,
         "file": "latest.zip",
@@ -131,10 +155,10 @@ def main() -> None:
         "sha256": hashlib.sha256(package).hexdigest().upper(),
     }
     manifest_bytes = (json.dumps(manifest, indent=2) + "\n").encode("utf-8")
-    manifest_item = upload_file(token, user, folder, "release.json", manifest_bytes)
-    manifest_url = anyone_view_link(token, user, manifest_item["id"])
+    manifest_item = upload_file(token, drive_id, folder_id, "release.json", manifest_bytes)
+    manifest_url = anyone_view_link(token, drive_id, manifest_item["id"])
 
-    print(f"Published app revision {revision} to the shared OneDrive update folder.")
+    print(f"Published app revision {revision} to OneDrive path '{resolved_path}'.")
     print(f"Update manifest link for the one-time client setup: {manifest_url}")
 
 
