@@ -1,0 +1,25 @@
+name: Show GitHub IDs for Microsoft setup
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  show-ids:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show owner and repository IDs
+        env:
+          OWNER: ${{ github.repository_owner }}
+          OWNER_ID: ${{ github.repository_owner_id }}
+          REPOSITORY: ${{ github.repository }}
+          REPOSITORY_ID: ${{ github.repository_id }}
+        run: |
+          {
+            echo "GitHub owner: $OWNER"
+            echo "GitHub owner ID: $OWNER_ID"
+            echo "Repository: $REPOSITORY"
+            echo "Repository ID: $REPOSITORY_ID"
+          } >> "$GITHUB_STEP_SUMMARY"
