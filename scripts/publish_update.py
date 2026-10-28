@@ -11,6 +11,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from pathlib import Path
 
 GRAPH = "https://graph.microsoft.com/v1.0"
@@ -141,10 +142,24 @@ def main() -> None:
     ).stdout.strip()
     with tempfile.TemporaryDirectory(prefix="qb-update-") as temp_dir:
         archive = Path(temp_dir) / "latest.zip"
+        versioned_archive = Path(temp_dir) / "latest-versioned.zip"
         subprocess.run(
             ["git", "archive", "--format=zip", f"--output={archive}", "HEAD"], check=True
         )
-        package = archive.read_bytes()
+        # Embed the exact published commit into the web app so each PC can
+        # visibly confirm which GitHub update it received.
+        with zipfile.ZipFile(archive, "r") as source, zipfile.ZipFile(
+            versioned_archive, "w", compression=zipfile.ZIP_DEFLATED
+        ) as output:
+            for entry in source.infolist():
+                if entry.filename == "web/build-version.json":
+                    continue
+                output.writestr(entry, source.read(entry.filename))
+            output.writestr(
+                "web/build-version.json",
+                (json.dumps({"version": revision}, indent=2) + "\n").encode("utf-8"),
+            )
+        package = versioned_archive.read_bytes()
 
     package_item = upload_file(token, drive_id, folder_id, "latest.zip", package)
     package_url = anyone_view_link(token, drive_id, package_item["id"])

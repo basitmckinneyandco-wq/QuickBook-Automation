@@ -4235,3 +4235,21 @@ wire();
 goto("dashboard");
 refresh();
 startWatching();
+
+// This ID is generated in the OneDrive release ZIP from its Git commit. It
+// gives us a visible way to confirm which published update this PC is running.
+fetch(`/build-version.json?t=${Date.now()}`, { cache: "no-store" })
+  .then((response) => {
+    if (!response.ok) throw new Error("Build ID is not available");
+    return response.json();
+  })
+  .then((build) => {
+    const label = $("buildLabel");
+    if (!label || !build.version) return;
+    label.textContent = `Build ${build.version}`;
+    label.title = `Running Git build ${build.version}`;
+  })
+  .catch(() => {
+    const label = $("buildLabel");
+    if (label) label.textContent = "Build local";
+  });
