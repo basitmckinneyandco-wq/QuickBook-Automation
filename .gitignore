@@ -2,6 +2,7 @@
 # config.example.json is the one that ships.
 config.json
 config-*.json
+update_config.json
 
 # The Google service account's private key. This is a password: anyone holding
 # it can read and write every sheet the account can reach. It never goes into
