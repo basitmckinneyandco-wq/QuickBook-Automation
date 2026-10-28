@@ -138,6 +138,23 @@ _CARRIER_ALIASES = {
 }
 
 
+# The office's own people, as the sheet writes them against the rep they are
+# on the QuickBooks Rep list. Kept here rather than in config.json because
+# these are colleagues, not a setting that differs by machine: left in the
+# settings file they reached one computer and no other, and the same person
+# then earned two entries on the Rep list with her invoices split between
+# them. Keys are compared through _rep_key, so case and full stops do not
+# matter; config.json can still add to this or override any line.
+_SOURCE_ALIASES = {
+    "tahir": "Taher",
+    "razia winback": "Razia",
+    "amber": "AMBREEN MERCHANT",
+    # The sheet writes Tej V far more often than Tej.
+    "tej": "TEJAL VAIDYA",
+    "tej v": "TEJAL VAIDYA",
+}
+
+
 def _carrier_key(value: str) -> str:
     """A carrier's name with the words that name no carrier taken out."""
     found = re.findall(r"[a-z0-9&]+", value.casefold())
@@ -439,9 +456,12 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         self.commission = commission or InvoiceKindConfig("", "")
         self.fees = fees or InvoiceKindConfig("", "")
         self.transaction_types = transaction_types or TransactionTypeConfig()
-        # Sheet spelling -> the rep it means, as the settings name them.
+        # Sheet spelling -> the rep it means. The table below travels with the
+        # app; config.json may add to it or override an entry, and does, since
+        # a company file can hold different people.
         self.source_aliases = {
-            _rep_key(said): meant for said, meant in (source_aliases or {}).items()
+            **_SOURCE_ALIASES,
+            **{_rep_key(said): meant for said, meant in (source_aliases or {}).items()},
         }
         # One SDK write at a time with breathing room. This prevents a batch
         # of adds/mods from overwhelming QuickBooks Desktop's UI process.
