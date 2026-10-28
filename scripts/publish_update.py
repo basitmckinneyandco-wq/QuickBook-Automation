@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import os
 import subprocess
@@ -50,6 +51,23 @@ def upload_file(token: str, user: str, folder: str, name: str, content: bytes) -
         raise RuntimeError(f"OneDrive upload failed with HTTP {error.code}: {detail}") from error
 
 
+def token_roles(token: str) -> list[str]:
+    """Read role names only; never log or return the bearer token itself."""
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+        return claims.get("roles", [])
+    except (IndexError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError("Could not inspect the Microsoft Graph token claims.") from error
+
+
+def verify_target_folder(token: str, user: str, folder: str) -> None:
+    user_path = urllib.parse.quote(user, safe="")
+    folder_path = "/".join(urllib.parse.quote(part, safe="") for part in folder.split("/"))
+    graph_request(token, "GET", f"{GRAPH}/users/{user_path}/drive/root:/{folder_path}")
+
+
 def anyone_view_link(token: str, user: str, item_id: str) -> str:
     user_path = urllib.parse.quote(user, safe="")
     item_path = urllib.parse.quote(item_id, safe="")
@@ -77,6 +95,22 @@ def main() -> None:
     token = token_result.stdout.strip()
     if not token:
         raise RuntimeError("Azure CLI returned an empty Microsoft Graph access token.")
+    roles = token_roles(token)
+    if "Files.ReadWrite.All" not in roles:
+        role_list = ", ".join(roles) if roles else "none"
+        raise RuntimeError(
+            "Microsoft Graph token is missing the Files.ReadWrite.All application role "
+            f"(token roles: {role_list}). In Entra, add Microsoft Graph > Application permissions > "
+            "Files.ReadWrite.All to the app identified by AZURE_CLIENT_ID, then grant admin consent."
+        )
+    try:
+        verify_target_folder(token, user, folder)
+    except RuntimeError as error:
+        raise RuntimeError(
+            f"Graph has the upload role but cannot open OneDrive folder '{folder}' for '{user}'. "
+            "Confirm the folder is in that account's OneDrive and the path is correct. "
+            f"Graph detail: {error}"
+        ) from error
 
     revision = subprocess.run(
         ["git", "rev-parse", "--short=12", "HEAD"], check=True, capture_output=True, text=True
