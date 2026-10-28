@@ -89,7 +89,12 @@ _CARRIER_ALIASES = {
     "phly": "Philadelphia Insurance",
     "philadelphia indemnity insurance company": "Philadelphia Insurance",
     "philadelhia": "Philadelphia Insurance",
+    # The office confirmed plain CRC is the Atlanta office, and that a row
+    # naming both the wholesaler and the carrier - "CRC USLI" - is billed
+    # under CRC rather than under the carrier that wrote the policy.
     "crc": "CRC Atlanta",
+    "crc usli": "CRC Atlanta",
+    "crc/crump": "CRC Atlanta",
     "utica": "Utica National Insurance",
     "utcia": "Utica National Insurance",
     "encova insurance": "Encova",

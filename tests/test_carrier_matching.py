@@ -12,7 +12,7 @@ ITEMS = [
     "Encova", "Amtrust", "RTS", "RPS", "Assurant Flood", "Employers Prefered Ins",
     "Burns & Wilcox", "Neptune Flood", "Foremost Insurance", "NationWide",
     "Vintage Underwriters", "Tokio marine", "STARFISH", "biBERK Business Insurance",
-    "Bass Underwriter", "Bass Underwriters",
+    "Bass Underwriter", "Bass Underwriters", "USLI",
 ]
 
 
@@ -76,6 +76,19 @@ class CarrierMatchingTests(unittest.TestCase):
         self.assertMatches("assurant", "Assurant Flood")
         for written in ("Employers", "employer", "Employers Ins. Co. of NV"):
             self.assertMatches(written, "Employers Prefered Ins")
+
+    def test_crc_goes_to_the_atlanta_office(self):
+        """The sheet writes "crc Atlanta" 125 times and plain CRC 49 times,
+        and the office confirmed they are one and the same."""
+        for written in ("CRC", "crc", "crc Atlanta"):
+            self.assertMatches(written, "CRC Atlanta")
+
+    def test_a_row_naming_wholesaler_and_carrier_bills_the_wholesaler(self):
+        """"CRC USLI" is a policy placed through CRC with USLI. Both are in
+        the Item List; the office bills these under CRC."""
+        self.assertMatches("CRC USLI", "CRC Atlanta")
+        self.assertMatches("CRC/Crump", "CRC Atlanta")
+        self.assertMatches("USLI", "USLI")      # on its own it is still USLI
 
     def test_two_items_that_shorten_alike_are_left_alone(self):
         """The Item List holds both Bass Underwriter and Bass Underwriters.
