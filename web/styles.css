@@ -1289,14 +1289,21 @@ td[data-key="__invoice"] .tag { display: block; margin-bottom: 3px; text-align: 
 .customer-hint {
   padding: 0 20px; margin: 14px 0 0; font-size: 12.5px;
 }
+/* Rows are sized by their own content and the list scrolls. Left as a plain
+   grid, several cards at once were squeezed to share the box's height, and
+   because a card hides its overflow that cut every one of them off below the
+   name - a dialog full of policies with nothing to click. */
 .customer-resolver {
   display: grid;
+  grid-auto-rows: min-content;
+  align-content: start;
   gap: 14px;
   padding: 14px 20px 18px;
   max-height: min(62vh, 620px);
   overflow-y: auto;
 }
 .customer-row {
+  min-height: 0;
   border: 1px solid var(--line); border-radius: 14px; overflow: hidden;
   background: var(--surface); box-shadow: var(--shadow);
   transition: border-color .2s, box-shadow .2s;
