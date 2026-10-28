@@ -65,6 +65,97 @@ _ENTITY_SUFFIXES = {
 }
 
 
+# Words that say what kind of business a carrier is rather than which one.
+# Dropped from both sides of the comparison, so the sheet's "Hanover" reaches
+# the Item List's "Hanover Insurance" and "Appalachian Underwriters, Inc"
+# reaches "Appalachian Underwriters Inc".
+_CARRIER_FILLERS = frozenset({
+    "insurance", "insurances", "ins", "assurance", "underwriters", "underwriter",
+    "uw", "inc", "incorporated", "llc", "lp", "llp", "co", "company", "corp",
+    "corporation", "group", "agency", "agencies", "services", "service",
+    "solutions", "solution", "the", "of", "and", "program", "programs",
+    "administrators", "administrator", "specialty", "general", "national",
+    "america", "americas", "american", "us", "usa", "direct", "mutual",
+})
+
+# Carriers no rule can reach: initials, house abbreviations and the
+# misspellings that recur. Each was read out of the agency's own sheet and
+# matched against its own Item List; the left side is what the sheet writes,
+# the right side the exact item in QuickBooks.
+_CARRIER_ALIASES = {
+    "amc": "American Management Corporation",
+    "american management": "American Management Corporation",
+    "american managemant": "American Management Corporation",
+    "phly": "Philadelphia Insurance",
+    "philadelphia indemnity insurance company": "Philadelphia Insurance",
+    "philadelhia": "Philadelphia Insurance",
+    "crc": "CRC Atlanta",
+    "utica": "Utica National Insurance",
+    "utcia": "Utica National Insurance",
+    "encova insurance": "Encova",
+    "applachian": "Appalachian Underwriters Inc",
+    "amtrust north amercia": "Amtrust",
+    # Both stand for Ryan Turner Specialty; the office confirmed one carrier.
+    "ryan turner specialty": "RTS",
+    "risk placement service": "RPS",
+    "risk placement services": "RPS",
+    "assurant": "Assurant Flood",
+    "bhhc": "Berkshire Hathaway Inc",
+    "berkshire hathaway direct insurance company": "Berkshire Hathaway Inc",
+    "berkshire hathaway homestate insurance": "Berkshire Hathaway Inc",
+    # The office confirmed every Employers spelling is the one carrier, the
+    # Nevada company included.
+    "employers": "Employers Prefered Ins",
+    "employer": "Employers Prefered Ins",
+    "employers preferred ins. co.": "Employers Prefered Ins",
+    "employers ins. co. of nv": "Employers Prefered Ins",
+    "amwins access insurance servic": "Amwins",
+    "amwins access insurance services llc": "Amwins",
+    "burn&wilcox": "Burns & Wilcox",
+    "burns&wilcox": "Burns & Wilcox",
+    "burns & wilocx": "Burns & Wilcox",
+    "united states liability insurance co.": "USLI",
+    "neptune": "Neptune Flood",
+    "us assure insurance services of florida, inc.": "US Assure",
+    "mc gowan": "McGowan Insurance",
+    "mcgowan excess & casualty": "McGowan Insurance",
+    "combined grp": "Combined Group",
+    "macneill group": "Macneil",
+    "professional program insurance brokerage": "Professional Program Insurance",
+    "aba insurance svc.": "ABA Insurance",
+    "fouders": "Founders Insurance",
+    "traevelers": "Travelers",
+    "traveler": "Travelers",
+    "vally froge": "Valley Forge",
+    "the hartfird": "The Hartford",
+    "greate point": "Great Point Insurance",
+    "souther insurance": "Southern Insurance",
+}
+
+
+def _carrier_key(value: str) -> str:
+    """A carrier's name with the words that name no carrier taken out."""
+    found = re.findall(r"[a-z0-9&]+", value.casefold())
+    kept = [word for word in found if word not in _CARRIER_FILLERS]
+    return " ".join(kept or found)
+
+
+def _group_by_key(names) -> dict[str, list[str]]:
+    """Item names by their shortened form, spaced and unspaced.
+
+    A key held by more than one item is kept with all of them, so the caller
+    can see it is ambiguous and decline to choose.
+    """
+    grouped: dict[str, list[str]] = {}
+    for name in names:
+        key = _carrier_key(name)
+        for form in {key, key.replace(" ", "")}:
+            grouped.setdefault(form, [])
+            if name not in grouped[form]:
+                grouped[form].append(name)
+    return grouped
+
+
 def _base_company_name(value: str) -> str:
     """The company name without whatever distinguishes one of its locations.
 
@@ -356,6 +447,8 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         self._reps: dict[str, str] | None = None
         self._rep_names: dict[str, str] = {}
         self._items: dict[str, str] | None = None
+        # Item names by their shortened form, rebuilt whenever the list changes.
+        self._item_keys: dict[str, list[str]] = {}
 
     def __enter__(self) -> "DesktopQuickBooksGateway":
         self.transport.__enter__()
@@ -685,7 +778,22 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         )
 
     def _resolve_item(self, name: str, settings, notes: list[str]) -> str:
-        """Carriers arrive as free text, so missing ones become items."""
+        """Carriers arrive as free text, so missing ones become items.
+
+        The sheet and the Item List rarely agree on a carrier's name. The sheet
+        says AMC, QuickBooks says American Management Corporation; the sheet
+        says Hanover, QuickBooks says Hanover Insurance. Taken literally, each
+        of those made a second item for a carrier already there, and the
+        commission for one carrier then sat under two names. Of 237 spellings
+        in the sheet, 157 matched nothing at all.
+
+        So the name is tried four ways, strictest first: exactly, then against
+        the abbreviations below, then ignoring the words that say what kind of
+        business it is rather than which one, then ignoring spacing too. Only a
+        single candidate is ever accepted - two items that shorten to the same
+        thing mean the company file itself is ambiguous, and guessing between
+        them would be worse than making the new item.
+        """
         if not name:
             return ""
         if self._items is None:
@@ -695,9 +803,18 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
                 value.casefold(): value
                 for value in _texts(xml, "ItemServiceRet", "FullName")
             }
+            self._item_keys = _group_by_key(self._items.values())
         existing = self._items.get(name.casefold())
         if existing:
             return existing
+
+        matched = self._match_item(name)
+        if matched:
+            notes.append(
+                f"Carrier '{name}' is '{matched}' in the QuickBooks Item List - used that."
+            )
+            return matched
+
         if not settings.item_income_account:
             notes.append(
                 f"Carrier '{name}' is not in the Item List and no income account is "
@@ -707,11 +824,27 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         short = name[:31]
         self._send(self.builder.service_item_add(short, settings.item_income_account))
         self._items[short.casefold()] = short
+        self._item_keys = _group_by_key(self._items.values())
         notes.append(
             f"Added '{short}' to the QuickBooks Item List, posting to "
             f"'{settings.item_income_account}'."
         )
         return short
+
+    def _match_item(self, name: str) -> str:
+        """The one existing item this carrier means, or "" if it is not clear."""
+        alias = _CARRIER_ALIASES.get(name.casefold())
+        if alias:
+            # The alias names a real item, so a company file that does not hold
+            # it falls through rather than inventing the full name.
+            found = self._items.get(alias.casefold())
+            if found:
+                return found
+        for key in (_carrier_key(name), _carrier_key(name).replace(" ", "")):
+            candidates = self._item_keys.get(key, ())
+            if len(candidates) == 1:
+                return candidates[0]
+        return ""
 
     def note_full_policy_number(self, record: WorkRecord, job: CustomerEntity) -> str:
         """Record the untruncated policy number in the job's Note box.
