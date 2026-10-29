@@ -15,6 +15,7 @@ const state = {
   status: "all",
   invoiceStatus: "all",
   invoiceKind: "all",
+  billFilter: "all",
   // Rows sent one at a time: source_id -> {phase, operation, label}. Held in
   // state so the badge survives the table being rebuilt when another row lands.
   rowJobs: new Map(),
@@ -174,6 +175,24 @@ const EXTRA_COLUMNS = [
         if (record[`${kind.key}_elsewhere`]) markFromSheet(badge);
         cell.append(badge);
       }
+      if (BILL_KIND.applies(record)) {
+        const status = record.bill_status || "ready";
+        const label = `Bill ${STATUS_LABEL[status] || status}`;
+        const badge = view.live || !DONE.has(status)
+          ? tag(label, status)
+          : tag(`${label} (safe test)`, "simulated");
+        const error = record.bill_error;
+        const reasons = record.bill_reasons || [];
+        const detail = error && status === "failed"
+          ? error
+          : (DONE.has(status) || status === NOT_NEEDED ? "" : reasons.join(" "));
+        if (detail) {
+          badge.title = detail;
+          badge.append(document.createTextNode(" ⓘ"));
+        }
+        if (record.bill_elsewhere) markFromSheet(badge);
+        cell.append(badge);
+      }
 
       // Same shape as the customer column: Send while there is nothing there,
       // Update once every invoice this row can raise has been raised.
@@ -187,6 +206,16 @@ const EXTRA_COLUMNS = [
           openInvoicePicker(record.source_id)
         )
       );
+      if (
+        billEligible(record)
+        && !["completed", "already_exists", NOT_NEEDED].includes(record.bill_status)
+      ) {
+        actions.append(
+          rowActionButton("Create Bill", () =>
+            openInvoicePicker(record.source_id, { preselectKind: "bill" })
+          )
+        );
+      }
       cell.append(actions);
       return cell;
     },
@@ -272,7 +301,7 @@ function batchColumn() {
 /** Which column an operation belongs to: "customer", "invoice" or "". */
 function operationColumn(operation) {
   if (!operation) return "";
-  return INVOICE_KINDS.some((kind) => kind.operation === operation)
+  return INVOICE_ACTIONS.some((kind) => kind.operation === operation)
     ? "invoice"
     : "customer";
 }
@@ -341,6 +370,25 @@ const INVOICE_KINDS = [
     applies: (record) => moneyValue(record.fees_amount) > 0,
   },
 ];
+
+const BILL_KIND = {
+  key: "bill",
+  short: "Bill",
+  label: "Carrier bill",
+  note: "Carrier vendor, effective date, policy number, and net due on Premium Payment.",
+  operation: "create_bill",
+  amount: (record) => record.premium_amount,
+  applies: isAgencyBill,
+};
+const INVOICE_ACTIONS = [...INVOICE_KINDS, BILL_KIND];
+
+function isAgencyBill(record) {
+  return /agency/i.test((record.extra || {}).billing || "");
+}
+
+function billEligible(record) {
+  return isAgencyBill(record) && DONE.has(filterStatus(record.premium_status));
+}
 
 function moneyValue(raw) {
   const number = Number(String(raw ?? "").replace(/[^0-9.-]/g, ""));
@@ -1407,7 +1455,10 @@ function visibleRecords() {
     // Two filters working together: which kind of invoice to look at, and what
     // state it must be in. "Premium only" + "Created" answers the question the
     // office actually asks - which policies have had their premium raised.
-    const kinds = invoiceKindsFor(record).filter(
+    const filterKinds = state.invoiceKind === "bill"
+      ? (BILL_KIND.applies(record) ? [BILL_KIND] : [])
+      : invoiceKindsFor(record);
+    const kinds = filterKinds.filter(
       (kind) => kind.operation
         && (state.invoiceKind === "all" || kind.key === state.invoiceKind)
     );
@@ -1418,6 +1469,7 @@ function visibleRecords() {
     ) {
       return false;
     }
+    if (state.billFilter === "eligible" && !billEligible(record)) return false;
     if (state.source !== "all" && record.source_tab !== state.source) return false;
     // The sheet writes this several ways - "Direct Billing", "Direct Bill",
     // one row with a stray capital - so the word decides, not the phrase.
@@ -1742,7 +1794,7 @@ function closeEditor() {
 
 /** The Invoice button opens this: which invoice does this policy need? */
 /** The picker, for one row or for everything selected. */
-function openInvoicePicker(sourceIds) {
+function openInvoicePicker(sourceIds, { preselectKind = "" } = {}) {
   const ids = Array.isArray(sourceIds) ? sourceIds : [sourceIds];
   const records = ids
     .map((id) => state.records.find((entry) => entry.source_id === id))
@@ -1751,20 +1803,25 @@ function openInvoicePicker(sourceIds) {
 
   // A kind is offered when at least one chosen row can raise it - so Fees is
   // hidden when nobody has a fee, and offered when even one row does.
-  const kinds = INVOICE_KINDS.filter((kind) => records.some((record) => kind.applies(record)));
+  const kinds = INVOICE_ACTIONS.filter((kind) => records.some((record) => kind.applies(record)));
   // Start with whatever is still outstanding, so the common case is one click.
   const runnable = kinds.filter((kind) => kind.operation);
   const outstanding = runnable.filter((kind) =>
     invoiceTargets(kind, records).some((record) => invoiceOutstanding(record, kind))
   );
-  const preselect = outstanding.length ? outstanding : runnable;
+  const outstandingInvoices = outstanding.filter((kind) => kind.key !== "bill");
+  const preselect = preselectKind
+    ? runnable.filter((kind) => kind.key === preselectKind)
+    : outstandingInvoices.length
+      ? outstandingInvoices
+      : runnable.filter((kind) => kind.key !== "bill");
   state.invoicing = {
     sourceIds: records.map((record) => record.source_id),
     kinds: new Set(preselect.map((kind) => kind.key)),
   };
 
   const many = records.length > 1;
-  $("invoiceTitle").textContent = outstanding.length ? "Create invoice" : "Update invoice";
+  $("invoiceTitle").textContent = "Create invoices or bills";
   $("invoiceSubtitle").textContent = many
     ? `${records.length} policies selected`
     : records[0].job_full_name || records[0].customer_name;
@@ -1794,10 +1851,20 @@ function invoiceBlockers(records, kinds) {
   const seen = new Set();
   for (const kind of kinds) {
     for (const record of invoiceTargets(kind, records)) {
-      for (const reason of record[`${kind.key}_reasons`] || []) seen.add(reason);
+      for (const reason of choiceReasons(record, kind)) seen.add(reason);
     }
   }
   return [...seen];
+}
+
+function choiceReasons(record, kind) {
+  const reasons = record[`${kind.key}_reasons`] || [];
+  if (
+    kind.key !== "bill"
+    || !state.invoicing?.kinds?.has("premium")
+    || (record.premium_reasons || []).length
+  ) return reasons;
+  return reasons.filter((reason) => !reason.startsWith("Create the premium invoice before"));
 }
 
 function invoiceChoice(kind, records) {
@@ -1906,7 +1973,7 @@ function notNeededButton(kind, targets, skipped) {
 /** Rebuild the choices in place, so a "not needed" change shows immediately. */
 function redrawInvoiceChoices() {
   const records = invoicingRecords();
-  const kinds = INVOICE_KINDS.filter((kind) => records.some((record) => kind.applies(record)));
+  const kinds = INVOICE_ACTIONS.filter((kind) => records.some((record) => kind.applies(record)));
   $("invoiceChoices").replaceChildren(...kinds.map((kind) => invoiceChoice(kind, records)));
   renderInvoiceChoice();
 }
@@ -1915,6 +1982,9 @@ function redrawInvoiceChoices() {
 function invoiceChoiceNote(kind, records) {
   const targets = invoiceTargets(kind, records);
   if (records.length === 1) {
+    if (kind.key === "bill") {
+      return `${kind.note} Amount: ${money(kind.amount(records[0]))}.`;
+    }
     const prefix = DONE.has(records[0][`${kind.key}_status`])
       ? "Already created — will be updated. "
       : "";
@@ -1936,7 +2006,7 @@ function renderInvoiceChoice() {
   const records = invoicingRecords();
   const many = records.length > 1;
   const runnable = [...choice.kinds]
-    .map((key) => INVOICE_KINDS.find((kind) => kind.key === key))
+    .map((key) => INVOICE_ACTIONS.find((kind) => kind.key === key))
     .filter((kind) => kind && kind.operation);
   const blockers = invoiceBlockers(records, runnable);
   // How many invoices this will actually try to raise, across all ticked kinds.
@@ -1950,7 +2020,7 @@ function renderInvoiceChoice() {
     (total, kind) =>
       total +
       invoiceTargets(kind, records).filter(
-        (record) => !(record[`${kind.key}_reasons`] || []).length
+        (record) => !choiceReasons(record, kind).length
       ).length,
     0
   );
@@ -1966,14 +2036,17 @@ function renderInvoiceChoice() {
 
   const create = $("invoiceCreate");
   create.disabled = readySends === 0;
-  create.textContent = readySends > 1 ? `Create ${readySends} invoices` : "Create invoice";
+  const includesBill = runnable.some((kind) => kind.key === "bill");
+  create.textContent = readySends > 1
+    ? `Create ${readySends} ${includesBill ? "items" : "invoices"}`
+    : includesBill && runnable.length === 1 ? "Create bill" : "Create invoice";
   $("invoiceNote").textContent = !choice.kinds.size
-    ? "Tick at least one invoice to create."
+    ? "Tick at least one invoice or bill to create."
     : runnable.length === 0
       ? "That invoice is not set up yet."
       : readySends === 0
         ? "Fix the missing details above first, then try again."
-        : "Raised on each policy's job in QuickBooks.";
+        : "Invoices run first; a selected bill follows on the same saved customer/job.";
 
   for (const label of document.querySelectorAll(".invoice-choice")) {
     label.classList.toggle("selected", choice.kinds.has(label.dataset.kind));
@@ -1989,7 +2062,7 @@ function closeInvoicePicker() {
 async function createInvoice() {
   const choice = state.invoicing;
   if (!choice) return;
-  const kinds = INVOICE_KINDS.filter(
+  const kinds = INVOICE_ACTIONS.filter(
     (kind) => choice.kinds.has(kind.key) && kind.operation
   );
   const records = invoicingRecords();
@@ -2561,6 +2634,7 @@ const OPERATION_LABEL = {
   premium_invoice: "premium invoice",
   commission_invoice: "commission invoice",
   fees_invoice: "fees invoice",
+  create_bill: "carrier bill",
 };
 
 /* Which log entries this page has already shown. Only the genuinely new ones
@@ -3789,8 +3863,9 @@ function watchProgress(button, what) {
     for (const done of progress.finished || []) {
       const record = state.records.find((entry) => entry.source_id === done.source_id);
       if (!record) continue;
-      const kind = INVOICE_KINDS.find((entry) => entry.operation === done.operation);
-      if (kind) record[`${kind.key}_status`] = done.status;
+      const kind = INVOICE_ACTIONS.find((entry) => entry.operation === done.operation);
+      if (kind?.key === "bill") record.bill_status = done.status;
+      else if (kind) record[`${kind.key}_status`] = done.status;
       else record.status = done.status;
     }
     state.sendingOperation = progress.operation || state.sendingOperation;
@@ -4158,6 +4233,10 @@ function wire() {
     renderTable();
     renderSelection();
   });
+  $("billFilter").addEventListener("change", (event) => {
+    state.billFilter = event.target.value;
+    reFilter();
+  });
   $("invoiceKindFilter").addEventListener("change", (event) => {
     state.invoiceKind = event.target.value;
     renderTable();
@@ -4246,10 +4325,27 @@ fetch(`/build-version.json?t=${Date.now()}`, { cache: "no-store" })
   .then((build) => {
     const label = $("buildLabel");
     if (!label || !build.version) return;
-    label.textContent = `Build ${build.version}`;
-    label.title = `Running Git build ${build.version}`;
+    const author = String(build.author || build.pushed_by || "unknown");
+    const pushedBy = String(build.pushed_by || author);
+    const summary = String(build.summary || "Change summary unavailable");
+    const detail = `Commit by ${author}. GitHub push by ${pushedBy}. Changes: ${summary}`;
+    label.textContent = `Build ${build.version} · ${author}`;
+    label.title = detail;
+    const summaryLabel = $("buildSummary");
+    if (summaryLabel) {
+      summaryLabel.textContent = summary;
+      summaryLabel.title = detail;
+    }
   })
   .catch(() => {
     const label = $("buildLabel");
-    if (label) label.textContent = "Build local";
+    if (label) {
+      label.textContent = "Build local";
+      label.title = "This app did not receive published build metadata.";
+    }
+    const summary = $("buildSummary");
+    if (summary) {
+      summary.textContent = "Unpublished local build";
+      summary.title = "This app did not receive published build metadata.";
+    }
   });

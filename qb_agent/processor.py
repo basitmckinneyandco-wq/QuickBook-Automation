@@ -379,6 +379,11 @@ class Processor:
             # WorkRecord.customer_reasons for why.
             if operation is Operation.CREATE_INVOICE:
                 reasons = record.review_reasons()
+            elif operation is Operation.CREATE_BILL:
+                customer_id, job_id = self._bill_mapping_ids(record)
+                reasons = record.bill_reasons(customer_id, job_id)
+                if not self._premium_was_created(record):
+                    reasons.append("Create the premium invoice before creating its bill.")
             elif operation.invoice_kind:
                 reasons = record.invoice_reasons(operation.invoice_kind)
             else:
@@ -430,6 +435,20 @@ class Processor:
             return kind == "premium" and record.direct_billed
 
         return {record.source_id for record in records if skip(record)}
+
+    def _premium_was_created(self, record: WorkRecord) -> bool:
+        saved = self.store.invoice_states([record.source_id], self.mode)
+        premium = saved.get(record.source_id, {}).get("premium")
+        if premium is not None and premium.status in FINISHED and premium.txn_id:
+            return True
+        sheet_status = record._extra("qb_premium").strip().casefold()
+        return sheet_status in {"created", "already there"}
+
+    def _bill_mapping_ids(self, record: WorkRecord) -> tuple[str, str]:
+        saved = self.store.get(record.source_id, self.mode)
+        customer_id = record.mapped_customer_list_id or (saved.customer_list_id if saved else "")
+        job_id = record.mapped_job_list_id or (saved.job_list_id if saved else "")
+        return customer_id or "", job_id or ""
 
     def _run_batch(
         self,
@@ -527,6 +546,9 @@ class Processor:
     ) -> ProcessingResult:
         steps: list[str] = []
         try:
+            if operation is Operation.CREATE_BILL:
+                return self._create_bill(gateway, record, steps)
+
             # 1. The corporation / account name becomes the customer.
             mapped = bool(record.mapped_customer_list_id)
             customer = (
@@ -793,6 +815,129 @@ class Processor:
             operation=spec["operation"],
         )
 
+    def _create_bill(self, gateway, record: WorkRecord, steps: list[str]) -> ProcessingResult:
+        """Create one carrier bill against the exact customer/job already chosen."""
+        try:
+            customer_id, job_id = self._bill_mapping_ids(record)
+            year = record.invoice_date.year if record.invoice_date else 0
+
+            if self.dry_run:
+                premium = None
+            else:
+                customer = gateway.find_customer_by_id(customer_id)
+                job = gateway.find_customer_by_id(job_id)
+                if customer is None or job is None:
+                    raise QuickBooksError(
+                        "The saved QuickBooks customer/job could not be found. "
+                        "Choose the customer and job again before creating the bill."
+                    )
+                if job.parent_list_id and job.parent_list_id != customer.list_id:
+                    raise QuickBooksError(
+                        "The saved job no longer belongs to the selected customer; "
+                        "the bill was not created."
+                    )
+                if not job.parent_list_id and not job.full_name.casefold().startswith(
+                    customer.full_name.casefold() + ":"
+                ):
+                    raise QuickBooksError(
+                        "The saved job does not belong to the selected customer; "
+                        "the bill was not created."
+                    )
+                premium = gateway.find_policy_invoice(
+                    record.quickbooks_invoice_number,
+                    "premium",
+                    job_list_id=job_id,
+                    policy_number=record.invoice_number,
+                    policy_year=year,
+                )
+                if premium is None or premium.customer_list_id != job_id:
+                    raise QuickBooksError(
+                        "The premium invoice for this policy was not found on the saved "
+                        "QuickBooks job. Create it first; no bill was created."
+                    )
+                steps.append(f"Premium invoice found on '{job.full_name}'.")
+
+            vendor = gateway.resolve_bill_vendor(record.commission_item)
+            if vendor.full_name.casefold() != record.commission_item.casefold():
+                steps.append(
+                    f"Carrier '{record.commission_item}' matched QuickBooks vendor "
+                    f"'{vendor.full_name}'."
+                )
+            # Match the Premium invoice's source memo: the sheet's Prem inv
+            # field (with the same fallback used by premium invoices).
+            memo = record.premium_description
+            existing = gateway.find_bill(
+                record.quickbooks_bill_ref_number,
+                vendor.list_id,
+                job_id,
+                record.invoice_date.isoformat() if record.invoice_date else "",
+            )
+            if existing is not None:
+                if existing.job_list_id != job_id:
+                    raise QuickBooksError(
+                        f"A bill with this policy number already exists for vendor "
+                        f"'{vendor.full_name}' on a different QuickBooks job "
+                        "in this policy year; no duplicate bill was created."
+                    )
+                if existing.memo != memo:
+                    bill = gateway.update_bill_memo(existing, memo)
+                    steps.append(
+                        "Existing bill Memo updated from Prem inv; vendor, date, "
+                        "amount, account, class, and expense line were left unchanged."
+                    )
+                    return self._save(
+                        record,
+                        "completed",
+                        "Existing carrier bill Memo updated from Prem inv.",
+                        steps=steps,
+                        customer_list_id=customer_id,
+                        job_list_id=job_id,
+                        invoice_txn_id=bill.txn_id,
+                        invoice_ref_number=bill.ref_number,
+                        operation=Operation.CREATE_BILL,
+                    )
+                steps.append(
+                    f"Bill {existing.ref_number} already exists for vendor "
+                    f"'{vendor.full_name}' on the selected job."
+                )
+                return self._save(
+                    record,
+                    "already_exists",
+                    "This carrier bill already exists in QuickBooks; nothing new was created.",
+                    steps=steps,
+                    customer_list_id=customer_id,
+                    job_list_id=job_id,
+                    invoice_txn_id=existing.txn_id,
+                    invoice_ref_number=existing.ref_number,
+                    operation=Operation.CREATE_BILL,
+                )
+
+            bill = gateway.create_bill(record, vendor, job_id, memo)
+            steps.append(
+                "Full Payment is assigned to the bill expense line. QuickBooks Desktop's "
+                "SDK does not expose the separate bill-header Class field."
+            )
+            steps.append(
+                f"Bill {bill.ref_number} created for vendor '{vendor.full_name}' "
+                f"for {record.premium_amount:f} on the selected job."
+            )
+            return self._save(
+                record,
+                "completed",
+                "Carrier bill created.",
+                steps=steps,
+                customer_list_id=customer_id,
+                job_list_id=job_id,
+                invoice_txn_id=bill.txn_id,
+                invoice_ref_number=bill.ref_number,
+                operation=Operation.CREATE_BILL,
+            )
+        except QuickBooksError as exc:
+            return self._save(
+                record, "failed", str(exc), steps=steps, error=str(exc),
+                operation=Operation.CREATE_BILL,
+            )
+
     def _find_lob_job(self, gateway, customer, lob: str, known_list_id: str = ""):
         """Find one existing job equivalent to the dashboard LOB, never by policy.
 
@@ -872,8 +1017,10 @@ class Processor:
         self, record: WorkRecord, operation: Operation = Operation.CREATE_INVOICE
     ) -> ProcessingResult | None:
         """Has this exact row already been finished in this mode before?"""
-        if operation is Operation.UPDATE_CUSTOMER:
-            return None  # an update is always worth re-sending
+        if operation in {Operation.UPDATE_CUSTOMER, Operation.CREATE_BILL}:
+            # Updates are always worth re-sending. Bills re-query QuickBooks so
+            # a changed Prem inv Memo can be applied to an existing bill.
+            return None
         if operation.invoice_kind:
             # Also always worth re-sending: an invoice already in QuickBooks is
             # updated in place, which is how a corrected row gets fixed.
@@ -947,7 +1094,19 @@ class Processor:
         error: str | None = None,
         operation: Operation = Operation.CREATE_INVOICE,
     ) -> ProcessingResult:
-        if operation.invoice_kind:
+        if operation is Operation.CREATE_BILL:
+            self.store.save_invoice(
+                record,
+                self.mode,
+                "bill",
+                status=status,
+                message=message,
+                txn_id=invoice_txn_id,
+                ref_number=invoice_ref_number,
+                error_message=error,
+                steps=steps,
+            )
+        elif operation.invoice_kind:
             # Kept apart so raising an invoice never rewrites the customer's status.
             self.store.save_invoice(
                 record,

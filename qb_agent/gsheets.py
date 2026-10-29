@@ -21,7 +21,7 @@ from typing import Iterable, Sequence
 API = "https://sheets.googleapis.com/v4/spreadsheets"
 SCOPES = ("https://www.googleapis.com/auth/spreadsheets",)
 
-# The four columns a dashboard writes so the other one can see what it did.
+# The five columns a dashboard writes so the other one can see what it did.
 # Matched by header text, because their position differs between tabs - the
 # New Business and Renewal sheets are one column out from each other.
 STATUS_HEADERS = {
@@ -29,7 +29,22 @@ STATUS_HEADERS = {
     "qb_premium": "qb premium",
     "qb_commission": "qb commission",
     "qb_fees": "qb fees",
+    "qb_bill": "qb bill",
 }
+
+_BILL_STATUS_ALIASES = ("qb bill", "bill status", "carrier bill", "bill")
+
+
+def _bill_column_for_tab(tab: str) -> int | None:
+    """The bill dropdown was placed explicitly at CC/CD in the two pipelines."""
+    name = tab.strip().casefold().replace("_", " ").replace("-", " ")
+    if "renewal" in name:
+        return 81  # CD, zero based
+    if name in {"nb", "new biz", "new business"} or (
+        "new" in name and ("business" in name or "biz" in name)
+    ):
+        return 80  # CC, zero based
+    return None
 
 # Saved by the customer resolver.  They are hidden in Google Sheets: staff use
 # the dashboard picker, while these stable IDs let every computer make the same
@@ -265,7 +280,7 @@ class Sheets:
 
 
 def status_columns(rows: Iterable[Sequence[object]], limit: int = 12) -> dict[str, int]:
-    """Where the four QB status columns are, found by their header text.
+    """Where the QB status columns are, found by their header text.
 
     Their position is not fixed: the two pipelines differ by a column, and a
     column inserted upstream would move them again. Matching on the header is
@@ -283,7 +298,9 @@ def status_columns(rows: Iterable[Sequence[object]], limit: int = 12) -> dict[st
     return {}
 
 
-def sheet_columns(rows: Iterable[Sequence[object]], limit: int = 12) -> dict[str, int]:
+def sheet_columns(
+    rows: Iterable[Sequence[object]], limit: int = 12, *, tab: str = ""
+) -> dict[str, int]:
     """All dashboard-owned columns already present in a tab."""
     headers = {**STATUS_HEADERS, **MAPPING_HEADERS}
     best: dict[str, int] = {}
@@ -294,8 +311,17 @@ def sheet_columns(rows: Iterable[Sequence[object]], limit: int = 12) -> dict[str
             for field, header in headers.items()
             if header in lowered
         }
+        if "qb_bill" not in found:
+            bill_header = next((name for name in _BILL_STATUS_ALIASES if name in lowered), None)
+            if bill_header:
+                found["qb_bill"] = lowered.index(bill_header)
         if len(found) > len(best):
             best = found
+    bill_column = _bill_column_for_tab(tab)
+    if bill_column is not None:
+        # CC/CD is the user-designated dropdown location. Treat it as the
+        # canonical column even when its header text is blank or abbreviated.
+        best["qb_bill"] = bill_column
     return best
 
 

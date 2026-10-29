@@ -27,6 +27,7 @@ from .models import InvoiceSpec, WorkRecord
 from .qbxml import (
     QbResponse,
     QbxmlBuilder,
+    parse_bill_matches,
     parse_invoice_matches,
     parse_customer_matches,
     parse_response,
@@ -261,6 +262,23 @@ class InvoiceEntity:
     memo: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class VendorEntity:
+    list_id: str
+    full_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class BillEntity:
+    txn_id: str
+    ref_number: str
+    vendor_list_id: str
+    job_list_id: str
+    txn_date: str = ""
+    memo: str = ""
+    edit_sequence: str = ""
+
+
 class QuickBooksGateway(Protocol):
     def __enter__(self) -> "QuickBooksGateway": ...
     def __exit__(self, exc_type, exc, traceback) -> None: ...
@@ -290,6 +308,14 @@ class QuickBooksGateway(Protocol):
     def update_policy_invoice(
         self, record: WorkRecord, job_list_id: str, kind: str, existing: InvoiceEntity
     ) -> tuple[InvoiceEntity, list[str]]: ...
+    def resolve_bill_vendor(self, carrier: str) -> VendorEntity: ...
+    def find_bill(
+        self, ref_number: str, vendor_list_id: str, job_list_id: str, effective_date: str
+    ) -> BillEntity | None: ...
+    def create_bill(
+        self, record: WorkRecord, vendor: VendorEntity, job_list_id: str, memo: str
+    ) -> BillEntity: ...
+    def update_bill_memo(self, existing: BillEntity, memo: str) -> BillEntity: ...
     def note_full_policy_number(self, record: WorkRecord, job: CustomerEntity) -> str: ...
 
 
@@ -712,6 +738,119 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
                     return _entity(match, ref_number)
         return _entity(candidates[0], ref_number)
 
+    def resolve_bill_vendor(self, carrier: str) -> VendorEntity:
+        """Use the commission invoice's carrier-item match to find its vendor.
+
+        The commission invoice resolves sheet Carrier names against the
+        QuickBooks Service Item master. Use that same canonical item name as
+        an additional key for the bill's Vendor lookup; a carrier alias may
+        not itself be the spelling used on the Vendor list.
+        """
+        self._load_service_items()
+        matched_item = self._match_item(carrier)
+        alias = _carrier_alias(carrier)
+        carrier_candidates = list(dict.fromkeys(
+            name.strip() for name in (matched_item, alias, carrier) if name.strip()
+        ))
+
+        xml = self.transport.request(self.builder.vendor_list())
+        self._raise_on_error(xml)
+        vendors = [
+            VendorEntity(
+                node.findtext("ListID", ""),
+                node.findtext("FullName") or node.findtext("Name", ""),
+            )
+            for node in ET.fromstring(xml).iter("VendorRet")
+            if node.findtext("ListID")
+            and (node.findtext("FullName") or node.findtext("Name"))
+        ]
+        by_name = {vendor.full_name.casefold(): vendor for vendor in vendors}
+        vendor_candidates = _group_by_key(vendor.full_name for vendor in vendors)
+        for candidate in carrier_candidates:
+            exact = by_name.get(candidate.casefold())
+            if exact:
+                return exact
+        for candidate in carrier_candidates:
+            key = _carrier_key(candidate)
+            for form in (key, key.replace(" ", "")):
+                names = vendor_candidates.get(form, ())
+                if len(names) == 1:
+                    return by_name[names[0].casefold()]
+                if len(names) > 1:
+                    raise QuickBooksError(
+                        f"Carrier '{carrier}' maps to '{candidate}', which matches more "
+                        "than one QuickBooks vendor; the bill was not created."
+                    )
+        attempted = ", ".join(f"'{name}'" for name in carrier_candidates)
+        raise QuickBooksError(
+            f"Carrier '{carrier}' did not match a QuickBooks vendor"
+            + (f" after commission-item matching tried {attempted}" if attempted else "")
+            + "; the bill was not created."
+        )
+
+    def find_bill(
+        self, ref_number: str, vendor_list_id: str, job_list_id: str, effective_date: str
+    ) -> BillEntity | None:
+        xml = self.transport.request(self.builder.bill_query(ref_number))
+        self._raise_on_error(xml)
+        candidates = []
+        for match in parse_bill_matches(xml):
+            if match["vendor_list_id"] != vendor_list_id:
+                continue
+            # A policy number can be reused on renewals. Only treat a bill as
+            # this policy's bill when its transaction date matches the row's
+            # Effective Date exactly.
+            if effective_date and match["txn_date"] != effective_date:
+                continue
+            candidates.append(BillEntity(
+                match["txn_id"], match["ref_number"] or ref_number,
+                match["vendor_list_id"], match["job_list_id"],
+                match["txn_date"], match["memo"], match["edit_sequence"],
+            ))
+        exact_job = [bill for bill in candidates if bill.job_list_id == job_list_id]
+        if len(exact_job) > 1:
+            raise QuickBooksError(
+                f"More than one bill matches policy '{ref_number}', vendor, "
+                f"job, and Effective Date '{effective_date}'. No bill was updated."
+            )
+        if exact_job:
+            return exact_job[0]
+        return candidates[0] if candidates else None
+
+    def create_bill(
+        self, record: WorkRecord, vendor: VendorEntity, job_list_id: str, memo: str
+    ) -> BillEntity:
+        response = self._send(
+            self.builder.bill_add(record, vendor.full_name, job_list_id, memo)
+        )
+        if not response.txn_id:
+            raise QuickBooksError("QuickBooks did not return a TxnID for the new bill.")
+        return BillEntity(
+            response.txn_id, response.ref_number or record.quickbooks_bill_ref_number,
+            vendor.list_id, job_list_id,
+            record.invoice_date.isoformat() if record.invoice_date else "", memo,
+            response.edit_sequence or "",
+        )
+
+    def update_bill_memo(self, existing: BillEntity, memo: str) -> BillEntity:
+        if not existing.edit_sequence:
+            raise QuickBooksError(
+                "QuickBooks did not return an EditSequence for the existing bill, "
+                "so its Memo cannot be updated."
+            )
+        response = self._send(
+            self.builder.bill_memo_mod(existing.txn_id, existing.edit_sequence, memo)
+        )
+        return BillEntity(
+            response.txn_id or existing.txn_id,
+            response.ref_number or existing.ref_number,
+            existing.vendor_list_id,
+            existing.job_list_id,
+            existing.txn_date,
+            memo,
+            response.edit_sequence or "",
+        )
+
     def kind_config(self, kind: str):
         return {"commission": self.commission, "fees": self.fees}.get(kind, self.premium)
 
@@ -821,14 +960,7 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         """
         if not name:
             return ""
-        if self._items is None:
-            xml = self.transport.request(self.builder.service_item_list())
-            self._raise_on_error(xml)
-            self._items = {
-                value.casefold(): value
-                for value in _texts(xml, "ItemServiceRet", "FullName")
-            }
-            self._item_keys = _group_by_key(self._items.values())
+        self._load_service_items()
         existing = self._items.get(name.casefold())
         if existing:
             return existing
@@ -870,6 +1002,18 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
             if len(candidates) == 1:
                 return candidates[0]
         return ""
+
+    def _load_service_items(self) -> None:
+        """Read the same Service Item master used for commission carrier matching."""
+        if self._items is not None:
+            return
+        xml = self.transport.request(self.builder.service_item_list())
+        self._raise_on_error(xml)
+        self._items = {
+            value.casefold(): value
+            for value in _texts(xml, "ItemServiceRet", "FullName")
+        }
+        self._item_keys = _group_by_key(self._items.values())
 
     def note_full_policy_number(self, record: WorkRecord, job: CustomerEntity) -> str:
         """Record the untruncated policy number in the job's Note box.
@@ -1137,6 +1281,7 @@ class DryRunQuickBooksGateway(AbstractContextManager["DryRunQuickBooksGateway"])
         self.company_file = company_file or "(dry run - no company file)"
         self.customers: dict[str, CustomerEntity] = {}
         self.invoices: dict[str, InvoiceEntity] = {}
+        self.bills: dict[str, BillEntity] = {}
 
     def __enter__(self) -> "DryRunQuickBooksGateway":
         return self
@@ -1225,6 +1370,38 @@ class DryRunQuickBooksGateway(AbstractContextManager["DryRunQuickBooksGateway"])
         # Keyed by year as well, so a dry run shows the same thing a real send
         # would do: a renewal under last year's number raises its own invoice.
         return self.invoices.get(f"{kind}|{policy_year}|{ref_number.casefold()}")
+
+    def resolve_bill_vendor(self, carrier: str) -> VendorEntity:
+        alias = _carrier_alias(carrier) or carrier.strip()
+        return VendorEntity(_fake_id("vendor", alias), alias)
+
+    def find_bill(
+        self, ref_number: str, vendor_list_id: str, job_list_id: str, effective_date: str
+    ) -> BillEntity | None:
+        return self.bills.get(f"{vendor_list_id}|{job_list_id}|{effective_date}|{ref_number.casefold()}")
+
+    def create_bill(
+        self, record: WorkRecord, vendor: VendorEntity, job_list_id: str, memo: str
+    ) -> BillEntity:
+        entity = BillEntity(
+            _fake_id("bill", record.quickbooks_bill_ref_number),
+            record.quickbooks_bill_ref_number, vendor.list_id, job_list_id,
+            record.invoice_date.isoformat() if record.invoice_date else "", memo,
+        )
+        key = f"{vendor.list_id}|{job_list_id}|{record.invoice_date.isoformat() if record.invoice_date else ''}|{record.quickbooks_bill_ref_number.casefold()}"
+        self.bills[key] = entity
+        return entity
+
+    def update_bill_memo(self, existing: BillEntity, memo: str) -> BillEntity:
+        updated = BillEntity(
+            existing.txn_id, existing.ref_number, existing.vendor_list_id,
+            existing.job_list_id, existing.txn_date, memo, existing.edit_sequence,
+        )
+        for key, bill in self.bills.items():
+            if bill.txn_id == existing.txn_id:
+                self.bills[key] = updated
+                break
+        return updated
 
     def create_policy_invoice(
         self, record: WorkRecord, job_list_id: str, kind: str
@@ -1433,6 +1610,17 @@ def _rep_key(value: str) -> str:
     return " ".join(kept.split())
 
 
+def _carrier_alias(value: str) -> str:
+    """Apply a known carrier alias even when the sheet appends a long name."""
+    wanted = f" {_rep_key(value)} "
+    matches = {
+        canonical
+        for alias, canonical in _CARRIER_ALIASES.items()
+        if f" {_rep_key(alias)} " in wanted
+    }
+    return matches.pop() if len(matches) == 1 else ""
+
+
 def _entity(match: dict[str, str], ref_number: str) -> InvoiceEntity:
     return InvoiceEntity(
         match["txn_id"],
@@ -1440,6 +1628,7 @@ def _entity(match: dict[str, str], ref_number: str) -> InvoiceEntity:
         match["customer_list_id"] or None,
         match["edit_sequence"],
         match["line_id"],
+        match["memo"],
     )
 
 

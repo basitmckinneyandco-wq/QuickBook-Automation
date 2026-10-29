@@ -6,7 +6,7 @@ from unittest.mock import patch
 from xml.etree import ElementTree as ET
 
 from qb_agent.models import InvoiceSpec, WorkRecord
-from qb_agent.qbxml import QbxmlBuilder, parse_response
+from qb_agent.qbxml import QbxmlBuilder, parse_bill_matches, parse_response
 from qb_agent.quickbooks import _normal_path, same_company_file
 
 BUILDER = QbxmlBuilder("13.0")
@@ -58,6 +58,43 @@ class CompanyPathTests(unittest.TestCase):
 
 
 class QbxmlTests(unittest.TestCase):
+    def test_bill_add_uses_policy_vendor_date_ref_ap_account_and_job_line(self):
+        record = replace(RECORD, extra=(("net_due", "1,250.50"),))
+        add = ET.fromstring(_body(BUILDER.bill_add(
+            record, "American Management Corporation", "JOB-1", "Premium header memo"
+        ))).find(".//BillAdd")
+        self.assertEqual(
+            [child.tag for child in add],
+            ["VendorRef", "APAccountRef", "TxnDate", "RefNumber", "Memo", "ExpenseLineAdd"],
+        )
+        self.assertEqual(add.findtext("VendorRef/FullName"), "American Management Corporation")
+        self.assertEqual(add.findtext("APAccountRef/FullName"), "Accounts Payable")
+        self.assertEqual(add.findtext("TxnDate"), "2026-09-01")
+        self.assertEqual(add.findtext("RefNumber"), "INV-1001")
+        self.assertEqual(add.findtext("Memo"), "Premium header memo")
+        self.assertIsNone(add.find("ClassRef"))  # BillAdd has no header ClassRef.
+        line = add.find("ExpenseLineAdd")
+        self.assertEqual(line.findtext("AccountRef/FullName"), "Premium Payment")
+        self.assertEqual(line.findtext("Amount"), "1250.50")
+        self.assertEqual(line.findtext("CustomerRef/ListID"), "JOB-1")
+        self.assertEqual(line.findtext("ClassRef/FullName"), "Full Payment")
+        self.assertIsNone(line.find("Memo"))
+        self.assertIsNone(add.find("TermsRef"))
+        self.assertIsNone(add.find("VendorAddress"))
+
+    def test_bill_query_reply_parser_reads_vendor_and_job_for_deduplication(self):
+        xml = """<QBXML><QBXMLMsgsRs><BillQueryRs><BillRet>
+          <TxnID>BILL-1</TxnID><RefNumber>INV-1001</RefNumber>
+          <TxnDate>2026-09-01</TxnDate><EditSequence>SEQ-1</EditSequence>
+          <VendorRef><ListID>V-1</ListID></VendorRef>
+          <Memo>Premium memo</Memo><ExpenseLineRet><CustomerRef><ListID>JOB-1</ListID>
+          </CustomerRef></ExpenseLineRet></BillRet></BillQueryRs></QBXMLMsgsRs></QBXML>"""
+        self.assertEqual(parse_bill_matches(xml), [{
+            "txn_id": "BILL-1", "ref_number": "INV-1001", "txn_date": "2026-09-01",
+            "edit_sequence": "SEQ-1", "vendor_list_id": "V-1",
+            "memo": "Premium memo", "job_list_id": "JOB-1",
+        }])
+
     def test_customer_add_has_the_schema_order(self):
         xml = BUILDER.customer_add(RECORD)
         add = ET.fromstring(_body(xml)).find(".//CustomerAdd")

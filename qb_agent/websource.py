@@ -78,6 +78,7 @@ FIELDS: dict[str, tuple[str, ...]] = {
     "qb_premium": ("qb premium",),
     "qb_commission": ("qb commission",),
     "qb_fees": ("qb fees",),
+    "qb_bill": ("qb bill", "bill status", "carrier bill", "bill"),
     "qb_customer_target": ("qb customer target",),
     "qb_customer_id": ("qb customer id",),
     "qb_customer_action": ("qb customer action",),
@@ -93,7 +94,7 @@ DISPLAY_FIELDS = (
     "net_due", "prem_inv", "fees_invoice", "policy_class",
     # What another dashboard has already done with this row. Empty when the
     # sheet has no status columns, or when nobody has sent it yet.
-    "qb_customer_job", "qb_premium", "qb_commission", "qb_fees",
+    "qb_customer_job", "qb_premium", "qb_commission", "qb_fees", "qb_bill",
     "qb_customer_target", "qb_customer_id", "qb_customer_action",
     "qb_job_target", "qb_job_id",
     "old_policy_number", "location",
@@ -211,6 +212,16 @@ def build_records(
     """
     header_index, header = _find_header(rows)
     columns, warnings = _map_columns(header)
+    # The bill dropdown's header can be abbreviated by whoever set up the
+    # sheet. Its approved locations are CC on New Business and CD on Renewal.
+    if "qb_bill" not in columns:
+        tab_name = tab.strip().casefold().replace("_", " ").replace("-", " ")
+        if "renewal" in tab_name:
+            columns["qb_bill"] = 81  # CD, zero based
+        elif tab_name in {"nb", "new biz", "new business"} or (
+            "new" in tab_name and ("business" in tab_name or "biz" in tab_name)
+        ):
+            columns["qb_bill"] = 80  # CC, zero based
     # New Business's location is a CRM field to the left of the verified
     # accounting block. Prefer its header, but accept the confirmed column-J
     # layout when that one cell has an unhelpful/blank header. Do not apply this
@@ -354,6 +365,7 @@ STATUS_LAYOUT = {
     "qb_commission": 23,
     "qb_fees": 24,
 }
+STATUS_WIDTH_WITH_BILL = 26
 
 FIXED_LAYOUT = {
     "policy_type": 0,
@@ -395,7 +407,7 @@ def _fixed_layout(rows: Sequence[Sequence[object]]) -> dict[str, int] | None:
     # Two widths are recognised, and only two: the original export, and that
     # same export with the four status columns appended. Anything else is a
     # change nobody has verified, and is still refused.
-    if widths not in ({FIXED_WIDTH}, {STATUS_WIDTH}):
+    if widths not in ({FIXED_WIDTH}, {STATUS_WIDTH}, {STATUS_WIDTH_WITH_BILL}):
         return None
     # The corporation name and the effective date are what every row must have.
     named = sum(1 for row in sample if str(row[FIXED_LAYOUT["customer_name"]]).strip())
@@ -405,6 +417,9 @@ def _fixed_layout(rows: Sequence[Sequence[object]]) -> dict[str, int] | None:
     layout = dict(FIXED_LAYOUT)
     if widths == {STATUS_WIDTH}:
         layout.update(STATUS_LAYOUT)
+    elif widths == {STATUS_WIDTH_WITH_BILL}:
+        layout.update(STATUS_LAYOUT)
+        layout["qb_bill"] = 25
     return layout
 
 

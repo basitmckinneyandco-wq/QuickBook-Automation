@@ -196,6 +196,42 @@ class QbxmlBuilder:
         self._invoice_line(line, spec)
         return self._serialize(root)
 
+    def bill_add(
+        self,
+        record: WorkRecord,
+        vendor_name: str,
+        job_list_id: str,
+        memo: str = "",
+        request_id: str = "policy-bill",
+    ) -> str:
+        """Add the carrier's bill against the saved policy job.
+
+        BillAdd supports ClassRef on its expense line, but not on the bill
+        header. The caller supplies the premium invoice's header Memo; the
+        expense-line Memo is intentionally left empty.
+        """
+        root, request = self._envelope("BillAddRq", request_id)
+        addition = ET.SubElement(request, "BillAdd")
+        vendor = ET.SubElement(addition, "VendorRef")
+        ET.SubElement(vendor, "FullName").text = vendor_name
+        ap_account = ET.SubElement(addition, "APAccountRef")
+        ET.SubElement(ap_account, "FullName").text = "Accounts Payable"
+        if record.invoice_date is not None:
+            ET.SubElement(addition, "TxnDate").text = record.invoice_date.isoformat()
+        ET.SubElement(addition, "RefNumber").text = record.quickbooks_bill_ref_number
+        if memo:
+            ET.SubElement(addition, "Memo").text = memo
+
+        line = ET.SubElement(addition, "ExpenseLineAdd")
+        account = ET.SubElement(line, "AccountRef")
+        ET.SubElement(account, "FullName").text = "Premium Payment"
+        ET.SubElement(line, "Amount").text = _money(record.premium_amount)
+        customer = ET.SubElement(line, "CustomerRef")
+        ET.SubElement(customer, "ListID").text = job_list_id
+        line_class = ET.SubElement(line, "ClassRef")
+        ET.SubElement(line_class, "FullName").text = "Full Payment"
+        return self._serialize(root)
+
     def _invoice_body(
         self,
         addition: ET.Element,
@@ -284,6 +320,14 @@ class QbxmlBuilder:
         root, _ = self._envelope("ClassQueryRq", request_id)
         return self._serialize(root)
 
+    def vendor_list(self, request_id: str = "vendor-list") -> str:
+        root, request = self._envelope("VendorQueryRq", request_id)
+        # VendorRet is a flat list entity: QuickBooks returns `Name`, not
+        # `FullName` (which it uses for hierarchical list objects).
+        for element in ("ListID", "Name"):
+            ET.SubElement(request, "IncludeRetElement").text = element
+        return self._serialize(root)
+
     # The two renamed template fields are list references, so their values have
     # to exist in QuickBooks before an invoice can point at them.
 
@@ -334,6 +378,27 @@ class QbxmlBuilder:
         entity = ET.SubElement(request, "EntityFilter")
         ET.SubElement(entity, "ListID").text = job_list_id
         ET.SubElement(request, "IncludeLineItems").text = "true"
+        return self._serialize(root)
+
+    def bill_query(self, ref_number: str, request_id: str = "bill-query") -> str:
+        root, request = self._envelope("BillQueryRq", request_id)
+        ET.SubElement(request, "RefNumber").text = ref_number
+        ET.SubElement(request, "IncludeLineItems").text = "true"
+        return self._serialize(root)
+
+    def bill_memo_mod(
+        self,
+        txn_id: str,
+        edit_sequence: str,
+        memo: str,
+        request_id: str = "policy-bill-memo-mod",
+    ) -> str:
+        """Update only the header Memo of an existing bill."""
+        root, request = self._envelope("BillModRq", request_id)
+        change = ET.SubElement(request, "BillMod")
+        ET.SubElement(change, "TxnID").text = txn_id
+        ET.SubElement(change, "EditSequence").text = edit_sequence
+        ET.SubElement(change, "Memo").text = memo
         return self._serialize(root)
 
     def invoice_add(
@@ -429,6 +494,22 @@ def parse_invoice_matches(xml: str) -> list[dict[str, str]]:
             "memo": ret.findtext("Memo", ""),
         }
         for ret in ET.fromstring(xml).iter("InvoiceRet")
+    ]
+
+
+def parse_bill_matches(xml: str) -> list[dict[str, str]]:
+    """Bills with the vendor, date, memo and policy job needed for safe reuse."""
+    return [
+        {
+            "txn_id": ret.findtext("TxnID", ""),
+            "ref_number": ret.findtext("RefNumber", ""),
+            "txn_date": ret.findtext("TxnDate", ""),
+            "edit_sequence": ret.findtext("EditSequence", ""),
+            "vendor_list_id": ret.findtext("VendorRef/ListID", ""),
+            "memo": ret.findtext("Memo", ""),
+            "job_list_id": ret.findtext("ExpenseLineRet/CustomerRef/ListID", ""),
+        }
+        for ret in ET.fromstring(xml).iter("BillRet")
     ]
 
 

@@ -69,6 +69,43 @@ class ProcessorTests(unittest.TestCase):
     def processor(self, config=None) -> Processor:
         return Processor(config or make_config(), self.store, lambda: self.gateway)
 
+    def test_agency_bill_is_created_after_premium_is_marked_created_and_not_twice(self):
+        record = replace(
+            self.records[0],
+            job_name="General Liability",
+            extra=(
+                ("billing", "Agency Bill"),
+                ("net_due", "1250.50"),
+                ("qb_customer_target", "Acme Roofing"),
+                ("qb_customer_id", "CUSTOMER-1"),
+                ("qb_customer_action", "match"),
+                ("qb_job_target", "Acme Roofing:General Liability"),
+                ("qb_job_id", "JOB-1"),
+                ("qb_premium", "Created"),
+            ),
+        )
+        first = self.processor().process_many([record], Operation.CREATE_BILL)[0]
+        self.assertEqual(first.status, "completed")
+        self.assertEqual(first.operation, "create_bill")
+        saved = self.store.invoice_states([record.source_id], "dry_run")
+        self.assertEqual(saved[record.source_id]["bill"].status, "completed")
+
+        second = self.processor().process_many([record], Operation.CREATE_BILL)[0]
+        self.assertEqual(second.status, "already_exists")
+
+    def test_bill_is_blocked_until_premium_invoice_is_created(self):
+        record = replace(
+            self.records[0],
+            extra=(
+                ("billing", "Agency Bill"), ("net_due", "1250.50"),
+                ("qb_customer_id", "CUSTOMER-1"), ("qb_customer_action", "match"),
+                ("qb_job_id", "JOB-1"),
+            ),
+        )
+        result = self.processor().process_many([record], Operation.CREATE_BILL)[0]
+        self.assertEqual(result.status, "needs_review")
+        self.assertIn("premium invoice", result.message.lower())
+
     def test_good_rows_complete_and_the_bad_row_is_held_back(self):
         results = self.processor().process_many(self.records)
         statuses = [result.status for result in results]

@@ -248,6 +248,10 @@ em { font-style: normal; }
   color: var(--muted); font-family: var(--mono, ui-monospace, monospace); font-size: 10px;
   white-space: nowrap;
 }
+.build-summary {
+  color: var(--muted); font-size: 10px; max-width: min(32vw, 360px);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 .badge {
   display: inline-flex; align-items: center; gap: 7px;

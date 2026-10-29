@@ -89,6 +89,7 @@
       </div>
       <div class="topbar-actions">
         <span class="build-label" id="buildLabel" title="Build ID">Build loading…</span>
+        <span class="build-summary" id="buildSummary" title="Build change summary"></span>
         <span class="badge" id="modePill">…</span>
       </div>
     </header>
@@ -286,6 +287,7 @@
             <option value="premium">Premium only</option>
             <option value="commission">Commission only</option>
             <option value="fees">Fees only</option>
+            <option value="bill">Carrier bills only</option>
           </select>
           <select id="invoiceFilter" aria-label="Filter by invoice status">
             <option value="all">All invoices</option>
@@ -294,6 +296,10 @@
             <option value="completed">Created</option>
             <option value="failed">Failed</option>
             <option value="not_needed">Not needed</option>
+          </select>
+          <select id="billFilter" aria-label="Filter by bill eligibility">
+            <option value="all">All rows</option>
+            <option value="eligible">Eligible bills</option>
           </select>
           <span class="spacer"></span>
           <span class="selection-note" id="selectionNote"></span>

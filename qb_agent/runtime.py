@@ -82,8 +82,8 @@ def _names_agree(sheet_name: str, quickbooks_name: str) -> bool:
     return bool(sheet & found)
 
 
-# The four columns a dashboard writes, as the rows carry them.
-STATUS_FIELDS = ("qb_customer_job", "qb_premium", "qb_commission", "qb_fees")
+# The five columns a dashboard writes, as the rows carry them.
+STATUS_FIELDS = ("qb_customer_job", "qb_premium", "qb_commission", "qb_fees", "qb_bill")
 MAPPING_FIELDS = (
     "qb_customer_target", "qb_customer_id", "qb_customer_action",
     "qb_job_target", "qb_job_id",
@@ -362,11 +362,44 @@ class Runtime:
                 item[f"{kind}_status"] = (
                     "review" if record.invoice_reasons(kind) else "ready"
                 )
+        bill = held.get("bill")
+        if bill is not None and bill.status == "needs_review":
+            bill = None
+        bill_from_sheet = elsewhere.get("qb_bill")
+        if bill_from_sheet == _RESET:
+            bill_from_sheet = ""
+        if bill_from_sheet:
+            item["bill_status"] = bill_from_sheet
+            if _done_elsewhere(bill_from_sheet, bill is not None and bool(bill.status)):
+                item["bill_elsewhere"] = True
+        elif bill is not None and bill.status:
+            item["bill_status"] = bill.status
+        elif not record.agency_billed:
+            item["bill_status"] = "not_needed"
+        else:
+            item["bill_status"] = "ready"
+        if bill is not None:
+            item["bill_txn_id"] = bill.txn_id
+            item["bill_ref_number"] = bill.ref_number
+            item["bill_error"] = bill.error_message
+        bill_reasons = record.bill_reasons(
+            str(item.get("customer_list_id") or ""),
+            str(item.get("job_list_id") or ""),
+        )
+        if str(item.get("premium_status", "")).casefold() not in {"completed", "already_exists"}:
+            saved_premium = held.get("premium")
+            if not (
+                saved_premium is not None
+                and saved_premium.status in {"completed", "already_exists"}
+                and saved_premium.txn_id
+            ) and record._extra("qb_premium").strip().casefold() not in {"created", "already there"}:
+                bill_reasons.append("Create the premium invoice before creating its bill.")
+        item["bill_reasons"] = bill_reasons
         return item
 
     # What each word in the sheet means here.
     #
-    # Only the first four record something a machine did, so only those are
+    # These fields record work a machine did, so only those are
     # worth carrying between dashboards. Pending means the opposite - "this one
     # is not done" - and is honoured as a reset: whatever this machine thinks
     # it did, the row is judged afresh.
@@ -377,17 +410,22 @@ class Runtime:
     # since been filled would still read Needs review, for ever.
     _SHEET_STATUS = {
         "created": "completed",
+        "bill created": "completed",
         "already there": "completed",
+        "bill already there": "completed",
         "failed": "failed",
+        "bill failed": "failed",
         "not needed": "not_needed",
+        "bill not needed": "not_needed",
         "pending": _RESET,
+        "bill pending": _RESET,
     }
 
     def _sheet_says(self, record: WorkRecord) -> dict[str, str]:
-        """What the sheet's four columns claim about this row, if anything."""
+        """What the sheet's status columns claim about this row, if anything."""
         extra = dict(record.extra)
         found: dict[str, str] = {}
-        for field in ("qb_customer_job", "qb_premium", "qb_commission", "qb_fees"):
+        for field in STATUS_FIELDS:
             # Values arrive from a dropdown and are sometimes pasted, so a
             # stray tab or trailing space is normal and must not stop a match.
             word = str(extra.get(field, "")).strip().casefold()
@@ -638,7 +676,7 @@ class Runtime:
                 grids[label] = grid
                 # Where this tab keeps its four status columns. Found per tab,
                 # because the two pipelines are a column out from each other.
-                self._status_columns[label] = sheet_columns(grid)
+                self._status_columns[label] = sheet_columns(grid, tab=label)
             except SheetsError as exc:
                 if available is None:
                     available = sheets.tab_titles()
@@ -1281,7 +1319,7 @@ class Runtime:
         if not title:
             raise SheetsError("The policy's Google Sheet tab is not configured.")
         grid = self._sheets().read(title)
-        columns = sheet_columns(grid)
+        columns = sheet_columns(grid, tab=label)
         missing = [field for field in MAPPING_FIELDS if field not in columns]
         if missing:
             header_row = dashboard_header_row(grid)
@@ -1319,6 +1357,7 @@ class Runtime:
         "premium_invoice": "qb_premium",
         "commission_invoice": "qb_commission",
         "fees_invoice": "qb_fees",
+        "create_bill": "qb_bill",
     }
     # What the sheet says. "Already there" is written as Created on purpose:
     # a reader of the sheet only needs to know the work is done, not who did it.
@@ -1346,6 +1385,7 @@ class Runtime:
         ("premium_status", "qb_premium"),
         ("commission_status", "qb_commission"),
         ("fees_status", "qb_fees"),
+        ("bill_status", "qb_bill"),
     )
 
     def sync_sheet(self, limit: int = 4000) -> dict[str, object]:
@@ -1396,7 +1436,10 @@ class Runtime:
                 if word == "Not needed":
                     kind = field.removesuffix("_status")
                     decided = marks.get(kind)
-                    by_rule = kind == "premium" and record.direct_billed
+                    by_rule = (
+                        (kind == "premium" and record.direct_billed)
+                        or (kind == "bill" and not record.agency_billed)
+                    )
                     if not by_rule and (decided is None or decided.status != "not_needed"):
                         continue
                 # Every status, not only the ones that record an action: the
@@ -1459,6 +1502,7 @@ class Runtime:
         ("qb_premium", "premium"),
         ("qb_commission", "commission"),
         ("qb_fees", "fees"),
+        ("qb_bill", "bill"),
     )
 
     def reset_statuses(self, write: bool = False) -> dict[str, object]:
@@ -1484,7 +1528,12 @@ class Runtime:
         unplaced: list[str] = []
         for record in list(self.records.values()):
             for column, kind in self._RESET_FIELDS:
-                word = "Pending" if not kind or record.invoice_applies(kind) else "Not needed"
+                needed = (
+                    record.agency_billed if kind == "bill"
+                    else record.invoice_applies(kind) if kind
+                    else True
+                )
+                word = "Pending" if needed else "Not needed"
                 cell = self._cell_for(record, column)
                 if not cell:
                     unplaced.append(record.customer_name)
@@ -1507,7 +1556,7 @@ class Runtime:
 
         for source_id in {source_id for source_id, *_ in planned}:
             self.store.forget_record(source_id, self.config.mode)
-            for kind in set(INVOICE_KINDS.values()):
+            for kind in {*INVOICE_KINDS.values(), "bill"}:
                 self.store.forget_invoice(source_id, self.config.mode, kind)
 
         updates = [(cell, word) for _, _, word, cell in planned]
@@ -1781,7 +1830,7 @@ class Runtime:
                     cleared += 1
                 continue
             kind = column.removeprefix("qb_")
-            if kind in set(INVOICE_KINDS.values()):
+            if kind in {*INVOICE_KINDS.values(), "bill"}:
                 if self.store.forget_invoice(source_id, self.config.mode, kind):
                     cleared += 1
                     # Said aloud: this deletes the record of an invoice that
@@ -1797,7 +1846,7 @@ class Runtime:
         return cleared
 
     def refresh_statuses(self) -> int:
-        """Re-read just the four status columns, straight from the sheet.
+        """Re-read the status columns, straight from the sheet.
 
         The published link carries them too, but it answers in a minute or
         three and fails often, so a status someone typed could sit unseen for
@@ -1890,7 +1939,8 @@ class Runtime:
                     continue
                 if word == "Not needed":
                     decided = marks.get(field.removesuffix("_status"))
-                    if decided is None or decided.status != "not_needed":
+                    by_rule = field == "bill_status" and not record.agency_billed
+                    if not by_rule and (decided is None or decided.status != "not_needed"):
                         continue        # nothing to bill is a reading, not a decision
                 cell = self._cell_for(record, column)
                 if not cell:
@@ -1939,7 +1989,7 @@ class Runtime:
         except SheetsError as exc:
             self.sheet_write_error = str(exc)
             return {}
-        self._status_columns[label] = sheet_columns(grid)
+        self._status_columns[label] = sheet_columns(grid, tab=label)
         try:
             # Every row, ready or not: this index is how a policy is found in
             # the sheet, and the published link's idea of which rows are

@@ -19,6 +19,7 @@ MAX_CUSTOMER_NAME = 41
 # QuickBooks rejects an invoice RefNumber (what we use for the policy number)
 # longer than this.
 MAX_REF_NUMBER = 11
+MAX_BILL_REF_NUMBER = 20
 
 
 class Action(StrEnum):
@@ -35,6 +36,7 @@ class Operation(StrEnum):
     PREMIUM_INVOICE = "premium_invoice"   # the premium payment invoice on the job
     COMMISSION_INVOICE = "commission_invoice"   # the commission invoice on the job
     FEES_INVOICE = "fees_invoice"         # the handling fees invoice on the job
+    CREATE_BILL = "create_bill"           # carrier bill for the policy's premium
 
     @property
     def invoice_kind(self) -> str:
@@ -151,6 +153,11 @@ class WorkRecord:
         return self.invoice_number[:MAX_REF_NUMBER]
 
     @property
+    def quickbooks_bill_ref_number(self) -> str:
+        """Bills allow a longer reference than invoices in QuickBooks Desktop."""
+        return self.invoice_number[:MAX_BILL_REF_NUMBER]
+
+    @property
     def invoice_number_was_shortened(self) -> bool:
         return self.quickbooks_invoice_number != self.invoice_number
 
@@ -255,6 +262,30 @@ class WorkRecord:
     def premium_amount(self) -> Decimal:
         """The premium invoice bills 'net due', not the commission."""
         return self._extra_money("net_due")
+
+    @property
+    def agency_billed(self) -> bool:
+        """Only explicit Agency Bill rows are eligible for a carrier bill."""
+        return "agency" in self.billing.casefold()
+
+    def bill_reasons(self, customer_list_id: str = "", job_list_id: str = "") -> list[str]:
+        """Fields needed to add the carrier bill against its saved QB job."""
+        reasons: list[str] = []
+        if not self.agency_billed:
+            reasons.append("Billing must be Agency Bill to create a carrier bill.")
+        if not self.commission_item:
+            reasons.append("Carrier is empty, so the bill vendor cannot be set.")
+        if self.invoice_date is None:
+            reasons.append("Effective date is missing, so the bill has no date.")
+        if not self.invoice_number.strip():
+            reasons.append("Policy number is missing, so the bill reference cannot be set.")
+        if self.premium_amount <= 0:
+            reasons.append("Net due must be greater than zero to create a bill.")
+        if not (self.mapped_customer_list_id or customer_list_id):
+            reasons.append("The selected QuickBooks customer is not saved for this row.")
+        if not (self.mapped_job_list_id or job_list_id):
+            reasons.append("The selected QuickBooks job is not saved for this row.")
+        return reasons
 
     @property
     def transaction_type(self) -> str:

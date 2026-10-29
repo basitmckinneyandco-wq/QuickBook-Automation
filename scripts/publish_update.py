@@ -115,6 +115,63 @@ def anyone_view_link(token: str, drive_id: str, item_id: str) -> str:
         raise RuntimeError("Microsoft Graph did not return a public view link for the update file.") from error
 
 
+def build_metadata(revision: str) -> dict[str, str]:
+    """Describe who triggered this GitHub build and the pushed commit message(s)."""
+    actor = os.environ.get("GITHUB_ACTOR", "").strip()
+    event: dict = {}
+    event_path = os.environ.get("GITHUB_EVENT_PATH", "")
+    if event_path:
+        try:
+            event = json.loads(Path(event_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            event = {}
+
+    commits = event.get("commits", []) if isinstance(event, dict) else []
+    messages = []
+    head = event.get("head_commit") or {} if isinstance(event, dict) else {}
+    author_data = head.get("author", {}) if isinstance(head, dict) else {}
+    author = ""
+    if isinstance(author_data, dict):
+        author = str(author_data.get("username") or author_data.get("name") or "").strip()
+    if isinstance(commits, list):
+        for commit in commits:
+            if isinstance(commit, dict):
+                message = str(commit.get("message", "")).splitlines()[0].strip()
+                if message and message not in messages:
+                    messages.append(message)
+    if not messages and isinstance(event, dict):
+        head = event.get("head_commit") or {}
+        if isinstance(head, dict):
+            message = str(head.get("message", "")).splitlines()[0].strip()
+            if message:
+                messages.append(message)
+
+    if not messages:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%s"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        if result.stdout.strip():
+            messages.append(result.stdout.strip().splitlines()[0])
+
+    if not author:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%an"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        author = result.stdout.strip() or "Unknown"
+
+    return {
+        "pushed_by": actor[:80] or author[:80],
+        "author": author[:80],
+        "summary": " · ".join(messages[:3])[:320] or f"GitHub build {revision}",
+    }
+
+
 def main() -> None:
     user = os.environ["QB_ONEDRIVE_USER"]
     folder = os.environ["QB_ONEDRIVE_FOLDER"]
@@ -140,6 +197,7 @@ def main() -> None:
     revision = subprocess.run(
         ["git", "rev-parse", "--short=12", "HEAD"], check=True, capture_output=True, text=True
     ).stdout.strip()
+    metadata = build_metadata(revision)
     with tempfile.TemporaryDirectory(prefix="qb-update-") as temp_dir:
         archive = Path(temp_dir) / "latest.zip"
         versioned_archive = Path(temp_dir) / "latest-versioned.zip"
@@ -157,7 +215,7 @@ def main() -> None:
                 output.writestr(entry, source.read(entry.filename))
             output.writestr(
                 "web/build-version.json",
-                (json.dumps({"version": revision}, indent=2) + "\n").encode("utf-8"),
+                (json.dumps({"version": revision, **metadata}, indent=2) + "\n").encode("utf-8"),
             )
         package = versioned_archive.read_bytes()
 
