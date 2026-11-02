@@ -207,7 +207,7 @@ const EXTRA_COLUMNS = [
         )
       );
       if (
-        billEligible(record)
+        isAgencyBill(record)
         && !["completed", "already_exists", NOT_NEEDED].includes(record.bill_status)
       ) {
         actions.append(
