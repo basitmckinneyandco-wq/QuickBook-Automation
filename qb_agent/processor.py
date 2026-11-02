@@ -382,7 +382,10 @@ class Processor:
             elif operation is Operation.CREATE_BILL:
                 customer_id, job_id = self._bill_mapping_ids(record)
                 reasons = record.bill_reasons(customer_id, job_id)
-                if not self._premium_was_created(record):
+                # In live mode, _create_bill verifies the invoice in QuickBooks;
+                # cached sheet/app status may be stale across sessions. Safe-test
+                # mode has no QuickBooks lookup, so it must use the simulated status.
+                if self.dry_run and not self._premium_was_created(record):
                     reasons.append("Create the premium invoice before creating its bill.")
             elif operation.invoice_kind:
                 reasons = record.invoice_reasons(operation.invoice_kind)

@@ -386,14 +386,6 @@ class Runtime:
             str(item.get("customer_list_id") or ""),
             str(item.get("job_list_id") or ""),
         )
-        if str(item.get("premium_status", "")).casefold() not in {"completed", "already_exists"}:
-            saved_premium = held.get("premium")
-            if not (
-                saved_premium is not None
-                and saved_premium.status in {"completed", "already_exists"}
-                and saved_premium.txn_id
-            ) and record._extra("qb_premium").strip().casefold() not in {"created", "already there"}:
-                bill_reasons.append("Create the premium invoice before creating its bill.")
         item["bill_reasons"] = bill_reasons
         return item
 
