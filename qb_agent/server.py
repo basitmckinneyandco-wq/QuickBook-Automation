@@ -15,6 +15,7 @@ from queue import Full, Queue
 from threading import Thread, Timer
 from typing import Any
 
+from .activity_log import ActivityLog
 from .edits import EditError
 from .models import Operation
 from .runtime import Runtime
@@ -26,6 +27,8 @@ from .websource import WebSourceError
 # done its work - written the invoice, saved the row - but never replies, and
 # the dashboard sits on a spinner. Handlers must never wait on the terminal.
 _LOG: "Queue[str]" = Queue(maxsize=500)
+_ACTIVITY_LOGGER: ActivityLog | None = None
+ACTIVITY_LOG_SPREADSHEET_ID = "1bjUM0ggJKLSYsgpCF9zYzBE83LOCN8inj0pXJTNH8WA"
 
 
 def log(message: str) -> None:
@@ -34,6 +37,13 @@ def log(message: str) -> None:
         _LOG.put_nowait(message)
     except Full:
         pass
+
+
+def shared_activity(event: str, details: str = "") -> None:
+    """Send a privacy-limited event to the optional cloud activity sheet."""
+    logger = _ACTIVITY_LOGGER
+    if logger is not None:
+        logger.record(event, details)
 
 
 def _drain_log() -> None:
@@ -81,6 +91,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._json({"records": runtime.records_payload(), "health": runtime.health()})
         elif self.path == "/api/activity":
             self._json({"activity": runtime.activity()})
+        elif self.path == "/api/live-activity":
+            logger = _ACTIVITY_LOGGER
+            self._json(logger.latest() if logger is not None else {"enabled": False, "rows": []})
         elif self.path == "/api/progress":
             # Deliberately lock-free: this is read while a batch holds the lock.
             self._json(runtime.progress())
@@ -107,6 +120,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json(self._process())
             elif self.path == "/api/customer-resolutions":
                 self._json(self._customer_resolutions())
+            elif self.path == "/api/bill-vendor-resolutions":
+                self._json(self._bill_vendor_resolutions())
             elif self.path == "/api/customer-mappings":
                 self._json(self._customer_mappings())
             elif self.path == "/api/company":
@@ -118,8 +133,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             else:
                 self._json({"error": "Unknown endpoint."}, HTTPStatus.NOT_FOUND)
         except (WebSourceError, EditError, ValueError, json.JSONDecodeError) as exc:
+            shared_activity("Request refused", "A dashboard request was rejected; see local History for details.")
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except Exception as exc:  # never let the dashboard hang on a traceback
+            shared_activity("Application error", "A dashboard request failed; see local History for details.")
             self._json({"error": f"Unexpected server error: {exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     # --- endpoints -----------------------------------------------------------
@@ -136,6 +153,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         log(
             f"Fetched {summary['loaded_rows']} row(s) from the {summary['tab']} tab "
             f"({summary['skipped_rows']} skipped)"
+        )
+        shared_activity(
+            "Policies refreshed",
+            f"{summary['loaded_rows']} rows loaded; {summary['skipped_rows']} skipped.",
         )
         return {"import": summary, "records": self.server.runtime.records_payload()}
 
@@ -162,6 +183,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             [str(one) for one in ids], {str(k): str(v) for k, v in values.items()}
         )
         log(f"Bulk edit: {len(result['updated'])} rows, {len(result['failed'])} refused")
+        shared_activity(
+            "Bulk edit",
+            f"{len(result['updated'])} rows updated; {len(result['failed'])} refused.",
+        )
         return result
 
     def _edit(self) -> dict[str, object]:
@@ -195,6 +220,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except QuickBooksError as exc:
             raise ValueError(str(exc)) from exc
         log(f"Now pointed at {switched['company']} ({switched['file_path']})")
+        shared_activity("QuickBooks company changed", "The selected company file changed.")
         return {"company": switched, "health": self.server.runtime.health()}
 
     def _source(self) -> dict[str, object]:
@@ -202,6 +228,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         payload = self._read_json()
         changed = self.server.runtime.use_data_source(str(payload.get("url", "")))
         log(f"Data source changed, {changed['rows']} rows loaded")
+        shared_activity("Data source changed", f"{changed['rows']} rows loaded.")
         return {"source": changed, "health": self.server.runtime.health()}
 
     def _invoice_needed(self) -> dict[str, object]:
@@ -223,10 +250,28 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             operation = Operation(str(payload.get("operation", Operation.CREATE_INVOICE.value)))
         except ValueError as exc:
             raise ValueError("That action is not supported.") from exc
-        results = self.server.runtime.process([str(value) for value in ids], operation)
+        vendor_choices = payload.get("vendor_choices", {})
+        if not isinstance(vendor_choices, dict):
+            raise ValueError("Bill vendor choices are invalid.")
+        cleaned_vendor_choices = {
+            str(source_id): str(list_id)
+            for source_id, list_id in vendor_choices.items()
+        }
+        shared_activity("Work started", f"{len(ids)} record(s); action: {operation.value}.")
+        results = self.server.runtime.process(
+            [str(value) for value in ids], operation, cleaned_vendor_choices
+        )
         log(f"Processed {len(results)} policy record(s) [{operation.value}]:")
         for result in results:
             log(f"  [{result.get('status')}] {result.get('label')} - {result.get('message')}")
+        failed = sum(
+            1 for result in results
+            if str(result.get("status", "")).casefold() in {"failed", "error"}
+        )
+        shared_activity(
+            "Work finished",
+            f"{len(results)} record(s) processed; {len(results) - failed} succeeded; {failed} failed.",
+        )
         return {
             "results": results,
             "records": self.server.runtime.records_payload(),
@@ -239,6 +284,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if not isinstance(ids, list) or not ids:
             raise ValueError("Select at least one policy first.")
         return self.server.runtime.customer_resolutions([str(value) for value in ids])
+
+    def _bill_vendor_resolutions(self) -> dict[str, object]:
+        payload = self._read_json()
+        ids = payload.get("ids", [])
+        if not isinstance(ids, list) or not ids:
+            raise ValueError("Select at least one policy first.")
+        return self.server.runtime.bill_vendor_resolutions([str(value) for value in ids])
 
     def _customer_mappings(self) -> dict[str, object]:
         payload = self._read_json()
@@ -301,6 +353,13 @@ def serve(
             )
             raise SystemExit(1) from None
         raise
+    global _ACTIVITY_LOGGER
+    _ACTIVITY_LOGGER = ActivityLog(
+        runtime.config.google_sheet.key_file,
+        ACTIVITY_LOG_SPREADSHEET_ID,
+    )
+    _ACTIVITY_LOGGER.start()
+    shared_activity("Dashboard started", "Dashboard is online.")
     runtime.start_prefetch()  # begin downloading the sheet while the page loads
     runtime.start_watching()  # then keep re-reading it, so new rows turn up on their own
     runtime.start_status_watch()  # and the four status columns, far more often

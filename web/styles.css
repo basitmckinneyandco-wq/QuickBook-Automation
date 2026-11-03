@@ -1408,6 +1408,22 @@ td[data-key="__invoice"] .tag { display: block; margin-bottom: 3px; text-align: 
 }
 .customer-option-name { min-width: 0; overflow-wrap: anywhere; line-height: 1.45; }
 .customer-option:has(input:checked) .customer-option-name { font-weight: 600; }
+.vendor-select-row { display: grid; gap: 6px; padding: 10px 12px; }
+.vendor-select-row span { color: var(--muted); font-size: 11px; }
+.vendor-select-row select {
+  width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--surface-2); color: var(--text);
+}
+.vendor-select-row input {
+  width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--surface-2); color: var(--text);
+}
+.vendor-select-row select:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint);
+}
+.vendor-select-row input:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint);
+}
 
 /* Creating a customer is the one choice here that cannot be taken back, so it
    is set below the matches behind a rule, not offered as another of them. */

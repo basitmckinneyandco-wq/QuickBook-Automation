@@ -2080,6 +2080,33 @@ async function createInvoice() {
       ids: invoiceTargets(kind, records).map((record) => record.source_id),
     }))
     .filter((batch) => batch.ids.length);
+
+  let vendorChoices = {};
+  const billBatch = batches.find((batch) => batch.kind.key === "bill");
+  if (billBatch) {
+    const button = $("invoiceCreate");
+    const doneLooking = startLookup(button, billBatch.ids.length, "carriers");
+    try {
+      const review = await billVendorResolutions(billBatch.ids);
+      doneLooking();
+      if ((review.unknown_ids || []).length) {
+        toast(`${review.unknown_ids.length} policies are no longer loaded. Refresh and try again.`, true);
+        return;
+      }
+      if ((review.review || []).length) {
+        const selected = await chooseQuickBooksVendors(
+          review.review, review.vendors || [], review.missing || []
+        );
+        if (!selected) return;
+        vendorChoices = selected;
+      }
+    } catch (error) {
+      doneLooking();
+      toast(error.message, true);
+      return;
+    }
+  }
+
   closeInvoicePicker();
   if (!batches.length) return;
 
@@ -2092,7 +2119,10 @@ async function createInvoice() {
       const current = state.records.find((entry) => entry.source_id === sourceId);
       const busy =
         current && DONE.has(current[`${batch.kind.key}_status`]) ? "Updating…" : "Creating…";
-      await actOnPolicy(sourceId, batch.kind.operation, rowInvoiceButton(sourceId), busy);
+      await actOnPolicy(
+        sourceId, batch.kind.operation, rowInvoiceButton(sourceId), busy,
+        batch.kind.key === "bill" ? vendorChoices : {}
+      );
     }
     return;
   }
@@ -2103,6 +2133,7 @@ async function createInvoice() {
         batch.ids.length === 1 ? "" : "s"
       }`,
       label: "Send Invoice",
+      vendorChoices: batch.kind.key === "bill" ? vendorChoices : {},
     });
   }
 }
@@ -3395,10 +3426,10 @@ function setBusy(button, busyLabel) {
 /* Looking a corporation name up in QuickBooks takes seconds, not milliseconds,
    and it happens between the click and the picker appearing. Without a word
    here the dashboard looks like it ignored the click. */
-function startLookup(button, count) {
+function startLookup(button, count, subject = "customers") {
   const sweep = div("lookup-sweep");
   sweep.innerHTML = `<span class="lookup-dot"></span><span class="lookup-text">Searching QuickBooks for ${
-    count === 1 ? "this customer" : `${count} customers`
+    count === 1 ? `this ${subject === "customers" ? "customer" : subject.replace(/s$/, "")}` : `${count} ${subject}`
   }…</span>`;
   document.body.append(sweep);
   requestAnimationFrame(() => sweep.classList.add("in"));
@@ -3454,12 +3485,28 @@ async function customerResolutions(ids) {
   return resolution;
 }
 
+async function billVendorResolutions(ids) {
+  return api(
+    "/api/bill-vendor-resolutions",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    },
+    SEND_TIMEOUT_MS
+  );
+}
+
 /** Ask for exact QuickBooks destinations, save them to the hidden sheet columns,
     and return the rows that are now safe to send. */
 function chooseQuickBooksCustomers(rows) {
   if (!rows.length) return Promise.resolve([]);
   const dialog = $("customerDialog");
   const choices = $("customerChoices");
+  const continueButton = $("customerContinue");
+  $("customerTitle").textContent = "Which customer is this?";
+  $("customerHint").textContent = "Nothing has been sent to QuickBooks yet.";
+  continueButton.textContent = "Save and continue";
   $("customerSubtitle").textContent = rows.length === 1
     ? "One policy is waiting on your answer"
     : `${rows.length} policies are waiting on your answer`;
@@ -3528,7 +3575,6 @@ function chooseQuickBooksCustomers(rows) {
     return card;
   }));
 
-  const continueButton = $("customerContinue");
   const update = () => {
     const picked = choices.querySelectorAll('input[type="radio"]:checked').length;
     continueButton.disabled = picked !== rows.length;
@@ -3600,6 +3646,129 @@ function chooseQuickBooksCustomers(rows) {
   });
 }
 
+/** Let the user choose a QuickBooks Vendor for carriers with uncertain matches. */
+function chooseQuickBooksVendors(rows, vendors, missing) {
+  if (!rows.length) return Promise.resolve({});
+  const dialog = $("customerDialog");
+  const choices = $("customerChoices");
+  const continueButton = $("customerContinue");
+  $("customerTitle").textContent = "Choose QuickBooks vendors";
+  $("customerSubtitle").textContent = rows.length === 1
+    ? "One carrier needs your choice"
+    : `${rows.length} carriers need your choice`;
+  $("customerHint").textContent = missing.length
+    ? `${missing.length} carrier${missing.length === 1 ? " was" : "s were"} not found. Review the suggested new vendor names below, or choose an existing vendor.`
+    : "No bills have been created yet. Choose a vendor for each carrier below.";
+  continueButton.textContent = "Use vendors and continue";
+
+  // Define this before row controls install callbacks that reference it. Rows
+  // defaulted to Add vendor can dispatch selection changes while being built.
+  let update = () => {};
+  const options = [new Option("Select a QuickBooks vendor…", "")];
+  for (const vendor of vendors) options.push(new Option(vendor.full_name, vendor.list_id));
+  options.push(new Option("+ Add a new vendor…", "__add_vendor__"));
+  choices.replaceChildren(...rows.map((row, position) => {
+    const card = div("customer-row");
+    const head = div("customer-row-head");
+    if (rows.length > 1) head.append(div("customer-step", String(position + 1)));
+    const naming = div("customer-naming");
+    const title = document.createElement("strong");
+    title.textContent = row.carrier || "Unnamed carrier";
+    const facts = div("customer-facts");
+    for (const fact of [row.policy_number && `Policy ${row.policy_number}`, row.job_name]) {
+      if (fact) facts.append(div("customer-chip", fact));
+    }
+    naming.append(title, facts);
+    head.append(naming);
+    const body = div("customer-options");
+    body.append(div(
+      "customer-note",
+      row.not_found
+        ? "No matching vendor was found. Add the suggested vendor, or choose an existing QuickBooks vendor."
+        : "Several vendors may match this carrier. Select the correct QuickBooks vendor."
+    ));
+    const selectRow = div("vendor-select-row");
+    const label = document.createElement("span");
+    label.textContent = "QuickBooks Vendor";
+    const select = document.createElement("select");
+    select.dataset.sourceId = row.source_id;
+    select.append(...options.map((option) => option.cloneNode(true)));
+    const newName = document.createElement("input");
+    newName.type = "text";
+    newName.value = row.suggested_name || row.carrier || "";
+    newName.placeholder = "New QuickBooks vendor name";
+    newName.dataset.sourceId = row.source_id;
+    newName.hidden = !row.not_found;
+    if (row.not_found) select.value = "__add_vendor__";
+    select.addEventListener("change", () => {
+      newName.hidden = select.value !== "__add_vendor__";
+      update();
+      if (!newName.hidden) newName.focus();
+    });
+    newName.addEventListener("input", update);
+    selectRow.append(label, select, newName);
+    body.append(selectRow);
+    card.append(head, body);
+    return card;
+  }));
+
+  update = () => {
+    const selects = [...choices.querySelectorAll("select[data-source-id]")];
+    const picked = selects.filter((select) =>
+      select.value && (select.value !== "__add_vendor__"
+        || choices.querySelector(`input[data-source-id="${CSS.escape(select.dataset.sourceId)}"]`)?.value.trim())
+    ).length;
+    continueButton.disabled = picked !== rows.length;
+    $("customerProgressBar").style.width = `${(picked / rows.length) * 100}%`;
+    $("customerProgress").classList.toggle("complete", picked === rows.length);
+    $("customerNote").textContent = picked === rows.length
+      ? "Your vendor choices will be used for these bills."
+      : `${rows.length - picked} of ${rows.length} still to choose.`;
+    for (const card of choices.querySelectorAll(".customer-row")) {
+      const select = card.querySelector("select");
+      const name = card.querySelector("input[type=text]");
+      card.classList.toggle("chosen", Boolean(
+        select?.value && (select.value !== "__add_vendor__" || name?.value.trim())
+      ));
+    }
+  };
+  choices.addEventListener("change", update);
+  update();
+
+  return new Promise((resolve) => {
+    const cleanup = (answer) => {
+      continueButton.removeEventListener("click", save);
+      $("customerCancel").removeEventListener("click", cancel);
+      $("customerClose").removeEventListener("click", cancel);
+      dialog.removeEventListener("close", cancel);
+      choices.removeEventListener("change", update);
+      if (dialog.open) dialog.close();
+      continueButton.textContent = "Save and continue";
+      $("customerTitle").textContent = "Which customer is this?";
+      $("customerHint").textContent = "Nothing has been sent to QuickBooks yet.";
+      resolve(answer);
+    };
+    const cancel = () => cleanup(null);
+    const save = () => {
+      const selected = [...choices.querySelectorAll("select[data-source-id]")];
+      if (selected.some((select) =>
+        !select.value || (select.value === "__add_vendor__"
+          && !choices.querySelector(`input[data-source-id="${CSS.escape(select.dataset.sourceId)}"]`)?.value.trim())
+      )) return;
+      cleanup(Object.fromEntries(selected.map((select) => {
+        const name = choices.querySelector(`input[data-source-id="${CSS.escape(select.dataset.sourceId)}"]`)?.value.trim();
+        return [select.dataset.sourceId, select.value === "__add_vendor__"
+          ? `__create_vendor__:${name}` : select.value];
+      })));
+    };
+    continueButton.addEventListener("click", save);
+    $("customerCancel").addEventListener("click", cancel);
+    $("customerClose").addEventListener("click", cancel);
+    dialog.addEventListener("close", cancel);
+    dialog.showModal();
+  });
+}
+
 /* QuickBooks Desktop's SDK only tolerates one session at a time - opening
    several at once (e.g. clicking Send on five rows in a row) can leave later
    ones waiting on an earlier one indefinitely, which looked like the button
@@ -3619,7 +3788,7 @@ function runQueued(task) {
 
 /** Send or update a single policy's customer, without touching the checkboxes.
     Clicking the row button is itself the confirmation - no popup on top of it. */
-async function actOnPolicy(sourceId, operation, button, label = "") {
+async function actOnPolicy(sourceId, operation, button, label = "", vendorChoices = {}) {
   const doneLooking = startLookup(button, 1);
   try {
     const resolution = await customerResolutions([sourceId]);
@@ -3659,7 +3828,11 @@ async function actOnPolicy(sourceId, operation, button, label = "") {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ids: [sourceId], operation }),
+          body: JSON.stringify({
+            ids: [sourceId], operation,
+            vendor_choices: vendorChoices[sourceId]
+              ? { [sourceId]: vendorChoices[sourceId] } : {},
+          }),
         },
         SEND_TIMEOUT_MS
       );
@@ -3940,7 +4113,7 @@ async function processBatch(
   operation,
   ids,
   buttonId,
-  { noun, label, clear = false, skipResolution = false } = {}
+  { noun, label, clear = false, skipResolution = false, vendorChoices = {} } = {}
 ) {
   if (!ids.length) return;
   const batch = ids.slice(0, MAX_SELECTION);   // the server refuses more anyway
@@ -3956,6 +4129,7 @@ async function processBatch(
           label,
           clear,
           skipResolution: true,
+          vendorChoices,
         });
       }
       const ambiguous = resolution.ambiguous || [];
@@ -3967,6 +4141,7 @@ async function processBatch(
             label,
             clear,
             skipResolution: true,
+            vendorChoices,
           });
         }
       }
@@ -3997,7 +4172,12 @@ async function processBatch(
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ids: batch, operation }),
+          body: JSON.stringify({
+            ids: batch, operation,
+            vendor_choices: Object.fromEntries(
+              batch.filter((id) => vendorChoices[id]).map((id) => [id, vendorChoices[id]])
+            ),
+          }),
         },
         SEND_TIMEOUT_MS
       );

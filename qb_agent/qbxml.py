@@ -328,6 +328,13 @@ class QbxmlBuilder:
             ET.SubElement(request, "IncludeRetElement").text = element
         return self._serialize(root)
 
+    def vendor_add(self, name: str, request_id: str = "vendor-add") -> str:
+        """Add a vendor after bill matching finds no safe existing match."""
+        root, request = self._envelope("VendorAddRq", request_id)
+        addition = ET.SubElement(request, "VendorAdd")
+        ET.SubElement(addition, "Name").text = name
+        return self._serialize(root)
+
     # The two renamed template fields are list references, so their values have
     # to exist in QuickBooks before an invoice can point at them.
 
@@ -398,6 +405,24 @@ class QbxmlBuilder:
         change = ET.SubElement(request, "BillMod")
         ET.SubElement(change, "TxnID").text = txn_id
         ET.SubElement(change, "EditSequence").text = edit_sequence
+        ET.SubElement(change, "Memo").text = memo
+        return self._serialize(root)
+
+    def bill_vendor_memo_mod(
+        self,
+        txn_id: str,
+        edit_sequence: str,
+        vendor_list_id: str,
+        memo: str,
+        request_id: str = "policy-bill-vendor-mod",
+    ) -> str:
+        """Change the existing bill's vendor and header Memo, preserving its lines."""
+        root, request = self._envelope("BillModRq", request_id)
+        change = ET.SubElement(request, "BillMod")
+        ET.SubElement(change, "TxnID").text = txn_id
+        ET.SubElement(change, "EditSequence").text = edit_sequence
+        vendor = ET.SubElement(change, "VendorRef")
+        ET.SubElement(vendor, "ListID").text = vendor_list_id
         ET.SubElement(change, "Memo").text = memo
         return self._serialize(root)
 

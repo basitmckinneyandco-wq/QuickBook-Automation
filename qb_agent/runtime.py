@@ -875,7 +875,10 @@ class Runtime:
         }
 
     def process(
-        self, source_ids: list[str], operation: Operation = Operation.CREATE_INVOICE
+        self,
+        source_ids: list[str],
+        operation: Operation = Operation.CREATE_INVOICE,
+        vendor_choices: dict[str, str] | None = None,
     ) -> list[dict[str, object]]:
         # Wait out a sheet refresh, but never queue behind another batch: if
         # QuickBooks has stopped answering - a crash dialog waiting for someone
@@ -937,7 +940,9 @@ class Runtime:
             try:
                 results = [
                     result.to_dict()
-                    for result in self.processor.process_many(selected, operation, report)
+                    for result in self.processor.process_many(
+                        selected, operation, report, vendor_choices or {}
+                    )
                 ]
             finally:
                 self._progress = {"active": False}
@@ -952,6 +957,67 @@ class Runtime:
         self._publish_mappings(results)
         self._publish_direct_billing(results)
         return results + unknown
+
+    def bill_vendor_resolutions(self, source_ids: list[str]) -> dict[str, object]:
+        """Review uncertain bill vendors before any invoice in the batch is sent."""
+        if not source_ids:
+            raise ValueError("Select at least one policy first.")
+        if len(source_ids) > MAX_BATCH:
+            raise ValueError(f"A batch cannot contain more than {MAX_BATCH} policies.")
+        if self.config.mode != "quickbooks":
+            return {"review": [], "missing": [], "vendors": [], "unknown_ids": []}
+
+        unknown = [source_id for source_id in source_ids if source_id not in self.records]
+        records = [self.records[source_id] for source_id in source_ids if source_id in self.records]
+        review: list[dict[str, object]] = []
+        missing: list[dict[str, str]] = []
+        self._take_lock(45)
+        try:
+            with self._read_gateway() as gateway:
+                vendors = []
+                cache: dict[str, dict[str, object]] = {}
+                for record in records:
+                    carrier = record.commission_item.strip()
+                    key = carrier.casefold()
+                    if key not in cache:
+                        cache[key] = gateway.review_bill_vendor(carrier)
+                    result = cache[key]
+                    if result["status"] == "review":
+                        review.append({
+                            "source_id": record.source_id,
+                            "carrier": carrier,
+                            "suggested_name": str(result.get("suggested_name", carrier)),
+                            "not_found": False,
+                            "policy_number": record.invoice_number,
+                            "job_name": record.job_name,
+                        })
+                    elif result["status"] == "missing":
+                        missing.append({
+                            "source_id": record.source_id,
+                            "carrier": carrier,
+                            "policy_number": record.invoice_number,
+                        })
+                        review.append({
+                            "source_id": record.source_id,
+                            "carrier": carrier,
+                            "suggested_name": str(result.get("suggested_name", carrier)),
+                            "not_found": True,
+                            "policy_number": record.invoice_number,
+                            "job_name": record.job_name,
+                        })
+                if review:
+                    vendors = gateway.list_vendors()
+        finally:
+            self._lock.release()
+        return {
+            "review": review,
+            "missing": missing,
+            "vendors": [
+                {"list_id": vendor.list_id, "full_name": vendor.full_name}
+                for vendor in vendors
+            ],
+            "unknown_ids": unknown,
+        }
 
     def customer_resolutions(self, source_ids: list[str]) -> dict[str, object]:
         """Classify rows, using a Renewal policy or New Business location first."""

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live app activity</title>
+<style>
+:root{color-scheme:light dark;font:15px/1.5 Segoe UI,Arial,sans-serif;background:#101817;color:#e9f1ef}body{margin:0;padding:24px;background:#101817}main{max-width:1180px;margin:auto}h1{margin:0;font-size:24px}.sub{color:#9aa9a5;margin:5px 0 20px}.bar{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 15px;background:#172220;border:1px solid #2b3b37;border-radius:10px;margin-bottom:12px}.status{color:#45d5b0}button{background:#1c302b;border:1px solid #36534a;color:#e9f1ef;border-radius:7px;padding:8px 13px;cursor:pointer}table{width:100%;border-collapse:collapse;background:#172220;border:1px solid #2b3b37;border-radius:10px;overflow:hidden}th,td{text-align:left;padding:11px 12px;border-bottom:1px solid #293834;vertical-align:top}th{font-size:12px;text-transform:uppercase;color:#9aa9a5}td:first-child{white-space:nowrap;color:#a8b7b3}td:nth-child(2),td:nth-child(3){white-space:nowrap}tbody tr:last-child td{border:0}.empty{padding:28px;text-align:center;color:#9aa9a5}@media(max-width:720px){body{padding:12px}.bar{align-items:flex-start;flex-direction:column}table{font-size:13px}th,td{padding:8px}.optional{display:none}}
+</style>
+</head>
+<body><main>
+<h1>Live app activity</h1><p class="sub">Activity from computers using this QuickBooks Automation install.</p>
+<div class="bar"><span id="status" class="status">Connecting to Google Sheets…</span><button id="refresh" type="button">Refresh now</button></div>
+<table><thead><tr><th>Time (UTC)</th><th>Computer</th><th class="optional">Windows user</th><th>Activity</th><th>Details</th></tr></thead><tbody id="rows"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody></table>
+</main><script>
+const statusEl=document.getElementById('status'), rowsEl=document.getElementById('rows');
+function cell(row,key){const td=document.createElement('td');td.textContent=row[key]||'';return td;}
+async function refresh(){try{const r=await fetch('/api/live-activity',{cache:'no-store'});const data=await r.json();statusEl.textContent=data.message||(data.enabled?'Connected':'Cloud logging is not configured');rowsEl.replaceChildren();if(!data.rows||!data.rows.length){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=5;td.className='empty';td.textContent=data.enabled?'No activity yet. Start the dashboard on the colleague computer to begin logging.':'The local service-account key is missing.';tr.append(td);rowsEl.append(tr);return;}for(const item of data.rows){const tr=document.createElement('tr');for(const key of ['Timestamp (UTC)','Computer','Windows user','Activity','Details'])tr.append(cell(item,key));rowsEl.append(tr);}}catch(e){statusEl.textContent='Could not connect to the local dashboard. Start Dashboard.cmd on this computer first.';}}
+document.getElementById('refresh').addEventListener('click',refresh);refresh();setInterval(refresh,5000);
+</script></body></html>

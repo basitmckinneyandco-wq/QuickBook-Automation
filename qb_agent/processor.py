@@ -29,7 +29,8 @@ SESSION_ERRORS = ("ticket parameter is invalid", "session is not open", "ticket 
 # Centre open on screen is enough. The row is fine; the list is simply busy, so
 # it is worth waiting a moment rather than reporting a failure.
 BUSY_ERRORS = ("in use by another user", "try again later", "is locked")
-MAX_BUSY_RETRIES = 4
+TRANSACTION_BUSY_ERRORS = ("3175", "transaction could not be locked", "could not be locked")
+MAX_BUSY_RETRIES = 10
 BUSY_PAUSE_SECONDS = 2.0
 
 # QuickBooks Desktop is sensitive to sustained SDK traffic. A completed row is
@@ -339,6 +340,7 @@ class Processor:
         records: list[WorkRecord],
         operation: Operation = Operation.CREATE_INVOICE,
         on_result=None,
+        vendor_choices: dict[str, str] | None = None,
     ) -> list[ProcessingResult]:
         """Work through the records, reporting each one as it finishes.
 
@@ -407,7 +409,7 @@ class Processor:
 
         # Step 2: work through the rest over a QuickBooks session.
         if pending:
-            self._run_batch(pending, results, operation, announce)
+            self._run_batch(pending, results, operation, announce, vendor_choices or {})
 
         return [results[record.source_id] for record in records if record.source_id in results]
 
@@ -459,6 +461,7 @@ class Processor:
         results: dict[str, ProcessingResult],
         operation: Operation = Operation.CREATE_INVOICE,
         announce=None,
+        vendor_choices: dict[str, str] | None = None,
     ) -> None:
         """Process the batch over one session, reopening it if QuickBooks drops us.
 
@@ -486,7 +489,10 @@ class Processor:
                     rows_this_session = 0
                     while remaining:
                         record = remaining[0]
-                        result = self._process_one(gateway, record, operation)
+                        result = self._process_one(
+                            gateway, record, operation,
+                            (vendor_choices or {}).get(record.source_id, ""),
+                        )
                         if _is_session_error(result) and reopens < MAX_REOPENS:
                             reopens += 1
                             break  # drop the dead session, reopen, retry this row
@@ -496,16 +502,29 @@ class Processor:
                         while _is_busy_error(result) and waits < MAX_BUSY_RETRIES:
                             waits += 1
                             sleep(BUSY_PAUSE_SECONDS)
-                            result = self._process_one(gateway, record, operation)
+                            result = self._process_one(
+                                gateway, record, operation,
+                                (vendor_choices or {}).get(record.source_id, ""),
+                            )
                         if _is_busy_error(result):
-                            # Still locked after waiting: say what to close,
-                            # rather than repeating QuickBooks' own wording.
+                            # The transaction itself can be held by another
+                            # QuickBooks user; say which window must be closed.
+                            if _is_transaction_busy_error(result):
+                                message = (
+                                    "QuickBooks kept this bill locked (error 3175). Close the "
+                                    "bill or transaction in QuickBooks on every computer that "
+                                    "has it open, then retry. No second bill was created."
+                                )
+                            else:
+                                message = (
+                                    "QuickBooks has the customer list locked. Close the "
+                                    "Customer Centre (and any open customer or job window) "
+                                    "in QuickBooks, then send again."
+                                )
                             result = self._save(
                                 record,
                                 "failed",
-                                "QuickBooks has the customer list locked. Close the "
-                                "Customer Centre (and any open customer or job window) "
-                                "in QuickBooks, then send again.",
+                                message,
                                 steps=result.steps,
                                 error=result.message,
                                 operation=operation,
@@ -546,11 +565,12 @@ class Processor:
         gateway: QuickBooksGateway,
         record: WorkRecord,
         operation: Operation = Operation.CREATE_INVOICE,
+        selected_vendor_id: str = "",
     ) -> ProcessingResult:
         steps: list[str] = []
         try:
             if operation is Operation.CREATE_BILL:
-                return self._create_bill(gateway, record, steps)
+                return self._create_bill(gateway, record, steps, selected_vendor_id)
 
             # 1. The corporation / account name becomes the customer.
             mapped = bool(record.mapped_customer_list_id)
@@ -818,7 +838,9 @@ class Processor:
             operation=spec["operation"],
         )
 
-    def _create_bill(self, gateway, record: WorkRecord, steps: list[str]) -> ProcessingResult:
+    def _create_bill(
+        self, gateway, record: WorkRecord, steps: list[str], selected_vendor_id: str = ""
+    ) -> ProcessingResult:
         """Create one carrier bill against the exact customer/job already chosen."""
         try:
             customer_id, job_id = self._bill_mapping_ids(record)
@@ -860,8 +882,15 @@ class Processor:
                     )
                 steps.append(f"Premium invoice found on '{job.full_name}'.")
 
-            vendor = gateway.resolve_bill_vendor(record.commission_item)
-            if vendor.full_name.casefold() != record.commission_item.casefold():
+            vendor = gateway.resolve_bill_vendor(
+                record.commission_item, selected_vendor_id
+            )
+            if vendor.created:
+                steps.append(
+                    f"Carrier '{record.commission_item}' was not found in the QuickBooks "
+                    f"Vendor List; added vendor '{vendor.full_name}'."
+                )
+            if not vendor.created and vendor.full_name.casefold() != record.commission_item.casefold():
                 steps.append(
                     f"Carrier '{record.commission_item}' matched QuickBooks vendor "
                     f"'{vendor.full_name}'."
@@ -878,20 +907,25 @@ class Processor:
             if existing is not None:
                 if existing.job_list_id != job_id:
                     raise QuickBooksError(
-                        f"A bill with this policy number already exists for vendor "
-                        f"'{vendor.full_name}' on a different QuickBooks job "
+                        f"A bill with this policy number and Effective Date already exists "
+                        f"on a different QuickBooks job "
                         "in this policy year; no duplicate bill was created."
                     )
-                if existing.memo != memo:
-                    bill = gateway.update_bill_memo(existing, memo)
+                if existing.vendor_list_id != vendor.list_id or existing.memo != memo:
+                    bill = gateway.update_bill(existing, vendor, memo)
+                    changed = []
+                    if existing.vendor_list_id != vendor.list_id:
+                        changed.append(f"vendor changed to '{vendor.full_name}'")
+                    if existing.memo != memo:
+                        changed.append("Memo updated from Prem inv")
                     steps.append(
-                        "Existing bill Memo updated from Prem inv; vendor, date, "
-                        "amount, account, class, and expense line were left unchanged."
+                        f"Existing bill updated: {', '.join(changed)}. Date, amount, "
+                        "account, class, and expense line were left unchanged."
                     )
                     return self._save(
                         record,
                         "completed",
-                        "Existing carrier bill Memo updated from Prem inv.",
+                        "Existing carrier bill updated from the current sheet data.",
                         steps=steps,
                         customer_list_id=customer_id,
                         job_list_id=job_id,
@@ -1158,7 +1192,14 @@ def _is_busy_error(result: ProcessingResult) -> bool:
     if result.status != "failed":
         return False
     message = result.message.casefold()
-    return any(phrase in message for phrase in BUSY_ERRORS)
+    return any(phrase in message for phrase in (*BUSY_ERRORS, *TRANSACTION_BUSY_ERRORS))
+
+
+def _is_transaction_busy_error(result: ProcessingResult) -> bool:
+    if result.status != "failed":
+        return False
+    message = result.message.casefold()
+    return any(phrase in message for phrase in TRANSACTION_BUSY_ERRORS)
 
 
 def _is_session_error(result: ProcessingResult) -> bool:

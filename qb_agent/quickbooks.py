@@ -138,6 +138,23 @@ _CARRIER_ALIASES = {
     "souther insurance": "Southern Insurance",
 }
 
+# Vendor names are a separate QuickBooks list from Service Items. Keep these
+# aliases separate so bill matching can follow the office's vendor spellings
+# without changing commission, premium, or fees invoice item matching.
+_VENDOR_ALIASES = {
+    "amc": "American Management Corporation",
+    "american management": "American Management Corporation",
+    "american managemant": "American Management Corporation",
+    "phly": "Philadelphia Indemnity Insurance Company",
+    "philadelphia indemnity insurance company": "Philadelphia Indemnity Insurance Company",
+    "encova": "Encova",
+    "rts": "Ryan Turner Specialty",
+    "rt specialty": "Ryan Turner Specialty",
+    "rt speciality": "Ryan Turner Specialty",
+    "ryan turner specialty": "Ryan Turner Specialty",
+    "accident fund insurance company": "Accident Fund Insurance",
+}
+
 
 # The office's own people, as the sheet writes them against the rep they are
 # on the QuickBooks Rep list. Kept here rather than in config.json because
@@ -177,6 +194,58 @@ def _group_by_key(names) -> dict[str, list[str]]:
             if name not in grouped[form]:
                 grouped[form].append(name)
     return grouped
+
+
+_VENDOR_FILLERS = frozenset({
+    "insurance", "insurances", "ins", "assurance", "underwriters",
+    "underwriter", "uw", "inc", "incorporated", "llc", "lp", "llp",
+    "co", "company", "corp", "corporation", "group", "the", "of", "and",
+})
+
+
+def _vendor_key(value: str) -> str:
+    """Normalize a vendor spelling while retaining meaningful name words."""
+    words = re.findall(r"[a-z0-9&]+", value.casefold())
+    kept = [word for word in words if word not in _VENDOR_FILLERS]
+    return " ".join(kept or words)
+
+
+def _group_vendors_by_key(names) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for name in names:
+        key = _vendor_key(name)
+        for form in {key, key.replace(" ", "")}:
+            grouped.setdefault(form, [])
+            if name not in grouped[form]:
+                grouped[form].append(name)
+    return grouped
+
+
+def _rank_fuzzy_vendors(candidates: list[str], vendors: list["VendorEntity"]):
+    """Rank likely vendor spellings after exact and normalized matching fail.
+
+    Fuzzy matching is deliberately constrained: compare meaningful names,
+    require a reasonably long name and the same first meaningful word, and
+    return every vendor close to the best score so callers can reject ties.
+    """
+    scores: dict[str, tuple[float, "VendorEntity"]] = {}
+    for candidate in candidates:
+        wanted = _vendor_key(candidate)
+        wanted_compact = wanted.replace(" ", "")
+        wanted_words = wanted.split()
+        if len(wanted_compact) < 6 or not wanted_words:
+            continue
+        for vendor in vendors:
+            actual = _vendor_key(vendor.full_name)
+            actual_compact = actual.replace(" ", "")
+            actual_words = actual.split()
+            if not actual_words or wanted_words[0] != actual_words[0]:
+                continue
+            score = SequenceMatcher(None, wanted_compact, actual_compact).ratio()
+            previous = scores.get(vendor.list_id)
+            if previous is None or score > previous[0]:
+                scores[vendor.list_id] = (score, vendor)
+    return sorted(scores.values(), key=lambda pair: (-pair[0], pair[1].full_name.casefold()))
 
 
 def _base_company_name(value: str) -> str:
@@ -266,6 +335,7 @@ class InvoiceEntity:
 class VendorEntity:
     list_id: str
     full_name: str
+    created: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,14 +378,20 @@ class QuickBooksGateway(Protocol):
     def update_policy_invoice(
         self, record: WorkRecord, job_list_id: str, kind: str, existing: InvoiceEntity
     ) -> tuple[InvoiceEntity, list[str]]: ...
-    def resolve_bill_vendor(self, carrier: str) -> VendorEntity: ...
+    def resolve_bill_vendor(
+        self, carrier: str, selected_vendor_id: str = ""
+    ) -> VendorEntity: ...
+    def review_bill_vendor(self, carrier: str) -> dict[str, object]: ...
+    def list_vendors(self) -> list[VendorEntity]: ...
     def find_bill(
         self, ref_number: str, vendor_list_id: str, job_list_id: str, effective_date: str
     ) -> BillEntity | None: ...
     def create_bill(
         self, record: WorkRecord, vendor: VendorEntity, job_list_id: str, memo: str
     ) -> BillEntity: ...
-    def update_bill_memo(self, existing: BillEntity, memo: str) -> BillEntity: ...
+    def update_bill(
+        self, existing: BillEntity, vendor: VendorEntity, memo: str
+    ) -> BillEntity: ...
     def note_full_policy_number(self, record: WorkRecord, job: CustomerEntity) -> str: ...
 
 
@@ -500,6 +576,7 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         self._items: dict[str, str] | None = None
         # Item names by their shortened form, rebuilt whenever the list changes.
         self._item_keys: dict[str, list[str]] = {}
+        self._vendors: list[VendorEntity] | None = None
 
     def __enter__(self) -> "DesktopQuickBooksGateway":
         self.transport.__enter__()
@@ -738,7 +815,103 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
                     return _entity(match, ref_number)
         return _entity(candidates[0], ref_number)
 
-    def resolve_bill_vendor(self, carrier: str) -> VendorEntity:
+    def _load_vendors(self) -> list[VendorEntity]:
+        if self._vendors is None:
+            xml = self.transport.request(self.builder.vendor_list())
+            self._raise_on_error(xml)
+            self._vendors = [
+                VendorEntity(
+                    node.findtext("ListID", ""),
+                    node.findtext("FullName") or node.findtext("Name", ""),
+                )
+                for node in ET.fromstring(xml).iter("VendorRet")
+                if node.findtext("ListID")
+                and (node.findtext("FullName") or node.findtext("Name"))
+            ]
+        return self._vendors
+
+    def list_vendors(self) -> list[VendorEntity]:
+        return list(self._load_vendors())
+
+    def _bill_vendor_candidates(self, carrier: str) -> list[str]:
+        self._load_service_items()
+        matched_item = self._match_item(carrier)
+        alias = _carrier_alias(carrier)
+        candidates = [
+            name.strip() for name in (matched_item, alias, carrier) if name.strip()
+        ]
+        vendor_alias = _VENDOR_ALIASES.get(carrier.strip().casefold())
+        if vendor_alias:
+            candidates.insert(0, vendor_alias)
+            if vendor_alias == "Ryan Turner Specialty":
+                candidates.extend(("RT Specialty", "RT Speciality", "RTS"))
+        return list(dict.fromkeys(candidates))
+
+    def _suggested_bill_vendor_name(self, carrier: str) -> str:
+        return (
+            _VENDOR_ALIASES.get(carrier.strip().casefold())
+            or self._match_item(carrier)
+            or _carrier_alias(carrier)
+            or carrier.strip()
+        )
+
+    def review_bill_vendor(self, carrier: str) -> dict[str, object]:
+        """Classify one carrier without writing to QuickBooks.
+
+        Clear exact and normalized matches proceed automatically. A fuzzy but
+        uncertain result is sent to the dashboard for a person to choose; no
+        plausible candidates means the normal bill flow will add the vendor.
+        """
+        candidates = self._bill_vendor_candidates(carrier)
+        suggested_name = self._suggested_bill_vendor_name(carrier)
+        vendors = self._load_vendors()
+        by_name = {vendor.full_name.casefold(): vendor for vendor in vendors}
+        grouped = _group_vendors_by_key(vendor.full_name for vendor in vendors)
+        for candidate in candidates:
+            exact = by_name.get(candidate.casefold())
+            if exact:
+                return {"status": "matched", "vendor": exact, "suggested_name": suggested_name}
+        normalized: dict[str, VendorEntity] = {}
+        for candidate in candidates:
+            key = _vendor_key(candidate)
+            for form in (key, key.replace(" ", "")):
+                for name in grouped.get(form, ()):
+                    vendor = by_name[name.casefold()]
+                    normalized[vendor.list_id] = vendor
+        if len(normalized) == 1:
+            return {
+                "status": "matched", "vendor": next(iter(normalized.values())),
+                "suggested_name": suggested_name,
+            }
+        if len(normalized) > 1:
+            return {
+                "status": "review", "candidates": list(normalized.values()),
+                "suggested_name": suggested_name,
+            }
+
+        ranked = _rank_fuzzy_vendors(candidates, vendors)
+        if ranked and ranked[0][0] >= 0.82:
+            best = ranked[0][0]
+            close = [vendor for score, vendor in ranked if score >= best - 0.05]
+            if len(close) == 1:
+                return {"status": "matched", "vendor": close[0], "suggested_name": suggested_name}
+            return {
+                "status": "review", "candidates": close,
+                "suggested_name": suggested_name,
+            }
+        if ranked and ranked[0][0] >= 0.55:
+            # A useful lead that did not meet the safe auto-match bar is a
+            # question for the user, not a reason to give up or add a duplicate.
+            return {
+                "status": "review",
+                "candidates": [vendor for _, vendor in ranked[:12]],
+                "suggested_name": suggested_name,
+            }
+        return {"status": "missing", "candidates": [], "suggested_name": suggested_name}
+
+    def resolve_bill_vendor(
+        self, carrier: str, selected_vendor_id: str = ""
+    ) -> VendorEntity:
         """Use the commission invoice's carrier-item match to find its vendor.
 
         The commission invoice resolves sheet Carrier names against the
@@ -746,32 +919,44 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         an additional key for the bill's Vendor lookup; a carrier alias may
         not itself be the spelling used on the Vendor list.
         """
-        self._load_service_items()
-        matched_item = self._match_item(carrier)
-        alias = _carrier_alias(carrier)
-        carrier_candidates = list(dict.fromkeys(
-            name.strip() for name in (matched_item, alias, carrier) if name.strip()
-        ))
-
-        xml = self.transport.request(self.builder.vendor_list())
-        self._raise_on_error(xml)
-        vendors = [
-            VendorEntity(
-                node.findtext("ListID", ""),
-                node.findtext("FullName") or node.findtext("Name", ""),
-            )
-            for node in ET.fromstring(xml).iter("VendorRet")
-            if node.findtext("ListID")
-            and (node.findtext("FullName") or node.findtext("Name"))
-        ]
+        carrier_candidates = self._bill_vendor_candidates(carrier)
+        vendors = self._load_vendors()
         by_name = {vendor.full_name.casefold(): vendor for vendor in vendors}
-        vendor_candidates = _group_by_key(vendor.full_name for vendor in vendors)
+        vendor_candidates = _group_vendors_by_key(vendor.full_name for vendor in vendors)
+        if selected_vendor_id:
+            create_prefix = "__create_vendor__:"
+            if selected_vendor_id.startswith(create_prefix):
+                name = selected_vendor_id[len(create_prefix):].strip()
+                existing = by_name.get(name.casefold())
+                if existing:
+                    return existing
+                key = _vendor_key(name)
+                equivalent = [
+                    vendor for vendor in vendors if _vendor_key(vendor.full_name) == key
+                ]
+                if len(equivalent) == 1:
+                    return equivalent[0]
+                if len(equivalent) > 1:
+                    raise QuickBooksError(
+                        f"Vendor name '{name}' already has multiple equivalent entries in "
+                        "QuickBooks. Select the intended vendor from the list."
+                    )
+                return self._create_vendor(name)
+            selected = next(
+                (vendor for vendor in vendors if vendor.list_id == selected_vendor_id), None
+            )
+            if selected is None:
+                raise QuickBooksError(
+                    "The selected QuickBooks vendor is no longer on the Vendor List. "
+                    "Refresh and choose again; the bill was not created."
+                )
+            return selected
         for candidate in carrier_candidates:
             exact = by_name.get(candidate.casefold())
             if exact:
                 return exact
         for candidate in carrier_candidates:
-            key = _carrier_key(candidate)
+            key = _vendor_key(candidate)
             for form in (key, key.replace(" ", "")):
                 names = vendor_candidates.get(form, ())
                 if len(names) == 1:
@@ -781,12 +966,44 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
                         f"Carrier '{carrier}' maps to '{candidate}', which matches more "
                         "than one QuickBooks vendor; the bill was not created."
                     )
-        attempted = ", ".join(f"'{name}'" for name in carrier_candidates)
+        fuzzy = _rank_fuzzy_vendors(carrier_candidates, vendors)
+        if fuzzy and fuzzy[0][0] >= 0.82:
+            best_score, best_vendor = fuzzy[0]
+            if len(fuzzy) > 1 and fuzzy[1][0] >= best_score - 0.05:
+                close_names = ", ".join(
+                    f"'{vendor.full_name}' ({score:.0%})"
+                    for score, vendor in fuzzy[:3]
+                    if score >= best_score - 0.05
+                )
+                raise QuickBooksError(
+                    f"Carrier '{carrier}' is close to multiple QuickBooks vendors: "
+                    f"{close_names}. The bill was not created; add a vendor alias to "
+                    "identify the correct vendor."
+                )
+            return best_vendor
         raise QuickBooksError(
-            f"Carrier '{carrier}' did not match a QuickBooks vendor"
-            + (f" after commission-item matching tried {attempted}" if attempted else "")
-            + "; the bill was not created."
+            f"Carrier '{carrier}' has no safe QuickBooks vendor match. Choose an existing "
+            "vendor or select Add a new vendor in the bill review dialog; the bill was not created."
         )
+
+    def _create_vendor(self, name: str) -> VendorEntity:
+        create_name = name.strip()
+        if not create_name:
+            raise QuickBooksError("Enter a name for the new QuickBooks vendor.")
+        if len(create_name) > 41:
+            raise QuickBooksError(
+                f"Vendor name '{create_name}' is too long to add to QuickBooks "
+                "(maximum 41 characters). The bill was not created."
+            )
+        response = self._send(self.builder.vendor_add(create_name))
+        if not response.list_id:
+            raise QuickBooksError(
+                f"QuickBooks did not return a ListID for the new vendor '{create_name}'."
+            )
+        created = VendorEntity(response.list_id, response.full_name or create_name, True)
+        if self._vendors is not None:
+            self._vendors.append(created)
+        return created
 
     def find_bill(
         self, ref_number: str, vendor_list_id: str, job_list_id: str, effective_date: str
@@ -795,11 +1012,10 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         self._raise_on_error(xml)
         candidates = []
         for match in parse_bill_matches(xml):
-            if match["vendor_list_id"] != vendor_list_id:
-                continue
             # A policy number can be reused on renewals. Only treat a bill as
             # this policy's bill when its transaction date matches the row's
-            # Effective Date exactly.
+            # Effective Date exactly. Vendor is deliberately not part of the
+            # identity because correcting a carrier should update this bill.
             if effective_date and match["txn_date"] != effective_date:
                 continue
             candidates.append(BillEntity(
@@ -810,12 +1026,22 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         exact_job = [bill for bill in candidates if bill.job_list_id == job_list_id]
         if len(exact_job) > 1:
             raise QuickBooksError(
-                f"More than one bill matches policy '{ref_number}', vendor, "
+                f"More than one bill matches policy '{ref_number}', "
                 f"job, and Effective Date '{effective_date}'. No bill was updated."
             )
         if exact_job:
             return exact_job[0]
-        return candidates[0] if candidates else None
+        same_vendor = [bill for bill in candidates if bill.vendor_list_id == vendor_list_id]
+        if len(same_vendor) == 1:
+            return same_vendor[0]
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            raise QuickBooksError(
+                f"More than one bill matches policy '{ref_number}' and Effective Date "
+                f"'{effective_date}', but none is on the selected job. No bill was updated."
+            )
+        return None
 
     def create_bill(
         self, record: WorkRecord, vendor: VendorEntity, job_list_id: str, memo: str
@@ -832,19 +1058,21 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
             response.edit_sequence or "",
         )
 
-    def update_bill_memo(self, existing: BillEntity, memo: str) -> BillEntity:
+    def update_bill(self, existing: BillEntity, vendor: VendorEntity, memo: str) -> BillEntity:
         if not existing.edit_sequence:
             raise QuickBooksError(
                 "QuickBooks did not return an EditSequence for the existing bill, "
-                "so its Memo cannot be updated."
+                "so its vendor and Memo cannot be updated."
             )
         response = self._send(
-            self.builder.bill_memo_mod(existing.txn_id, existing.edit_sequence, memo)
+            self.builder.bill_vendor_memo_mod(
+                existing.txn_id, existing.edit_sequence, vendor.list_id, memo
+            )
         )
         return BillEntity(
             response.txn_id or existing.txn_id,
             response.ref_number or existing.ref_number,
-            existing.vendor_list_id,
+            vendor.list_id,
             existing.job_list_id,
             existing.txn_date,
             memo,
@@ -1371,14 +1599,37 @@ class DryRunQuickBooksGateway(AbstractContextManager["DryRunQuickBooksGateway"])
         # would do: a renewal under last year's number raises its own invoice.
         return self.invoices.get(f"{kind}|{policy_year}|{ref_number.casefold()}")
 
-    def resolve_bill_vendor(self, carrier: str) -> VendorEntity:
-        alias = _carrier_alias(carrier) or carrier.strip()
-        return VendorEntity(_fake_id("vendor", alias), alias)
+    def resolve_bill_vendor(
+        self, carrier: str, selected_vendor_id: str = ""
+    ) -> VendorEntity:
+        alias = _VENDOR_ALIASES.get(carrier.strip().casefold())
+        name = alias or _carrier_alias(carrier) or carrier.strip()
+        return VendorEntity(_fake_id("vendor", name), name)
+
+    def review_bill_vendor(self, carrier: str) -> dict[str, object]:
+        return {"status": "missing", "candidates": []}
+
+    def list_vendors(self) -> list[VendorEntity]:
+        return []
 
     def find_bill(
         self, ref_number: str, vendor_list_id: str, job_list_id: str, effective_date: str
     ) -> BillEntity | None:
-        return self.bills.get(f"{vendor_list_id}|{job_list_id}|{effective_date}|{ref_number.casefold()}")
+        matches = [
+            bill for bill in self.bills.values()
+            if bill.ref_number.casefold() == ref_number.casefold()
+            and bill.txn_date == effective_date
+        ]
+        exact_job = [bill for bill in matches if bill.job_list_id == job_list_id]
+        if len(exact_job) == 1:
+            return exact_job[0]
+        if len(exact_job) > 1:
+            raise QuickBooksError(
+                f"More than one bill matches policy '{ref_number}', job, and "
+                f"Effective Date '{effective_date}'."
+            )
+        same_vendor = [bill for bill in matches if bill.vendor_list_id == vendor_list_id]
+        return same_vendor[0] if len(same_vendor) == 1 else (matches[0] if len(matches) == 1 else None)
 
     def create_bill(
         self, record: WorkRecord, vendor: VendorEntity, job_list_id: str, memo: str
@@ -1392,15 +1643,15 @@ class DryRunQuickBooksGateway(AbstractContextManager["DryRunQuickBooksGateway"])
         self.bills[key] = entity
         return entity
 
-    def update_bill_memo(self, existing: BillEntity, memo: str) -> BillEntity:
+    def update_bill(self, existing: BillEntity, vendor: VendorEntity, memo: str) -> BillEntity:
         updated = BillEntity(
-            existing.txn_id, existing.ref_number, existing.vendor_list_id,
+            existing.txn_id, existing.ref_number, vendor.list_id,
             existing.job_list_id, existing.txn_date, memo, existing.edit_sequence,
         )
-        for key, bill in self.bills.items():
-            if bill.txn_id == existing.txn_id:
-                self.bills[key] = updated
-                break
+        old_key = f"{existing.vendor_list_id}|{existing.job_list_id}|{existing.txn_date}|{existing.ref_number.casefold()}"
+        self.bills.pop(old_key, None)
+        new_key = f"{vendor.list_id}|{updated.job_list_id}|{updated.txn_date}|{updated.ref_number.casefold()}"
+        self.bills[new_key] = updated
         return updated
 
     def create_policy_invoice(
