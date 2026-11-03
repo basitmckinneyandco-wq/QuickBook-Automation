@@ -7,12 +7,14 @@ Policies come from the Google Sheet feed, so every endpoint here is JSON.
 from __future__ import annotations
 
 import json
+import re
+from collections import Counter
 import webbrowser
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Full, Queue
-from threading import Thread, Timer
+from threading import Event, Thread, Timer
 from typing import Any
 
 from .activity_log import ActivityLog
@@ -39,11 +41,83 @@ def log(message: str) -> None:
         pass
 
 
-def shared_activity(event: str, details: str = "") -> None:
-    """Send a privacy-limited event to the optional cloud activity sheet."""
+def shared_activity(
+    event: str,
+    details: str = "",
+    *,
+    company: str = "",
+    policy_number: str = "",
+) -> None:
+    """Send a limited operational event to the optional cloud activity sheet."""
     logger = _ACTIVITY_LOGGER
     if logger is not None:
-        logger.record(event, details)
+        logger.record(event, details, company=company, policy_number=policy_number)
+
+
+def _activity_title(operation: str) -> str:
+    return {
+        "create_invoice": "Invoice",
+        "premium_invoice": "Premium invoice",
+        "commission_invoice": "Commission invoice",
+        "fees_invoice": "Fees invoice",
+        "create_bill": "Bill",
+        "create_customer": "Customer/job",
+        "update_customer": "Customer update",
+    }.get(operation, "QuickBooks action")
+
+
+def _activity_event(operation: str, status: str, message: str, dry_run: bool = False) -> str:
+    title = _activity_title(operation)
+    state = status.casefold()
+    if state == "failed":
+        return f"{title} failed"
+    if state == "needs_review":
+        return f"{title} needs review"
+    if state == "already_exists":
+        return f"{title} already exists"
+    if state == "not_needed":
+        return f"{title} not needed"
+    if state == "completed":
+        if dry_run:
+            return f"{title} ready (test mode)"
+        return f"{title} updated" if "updated" in message.casefold() else f"{title} created"
+    return f"{title} {state or 'finished'}"
+
+
+def _safe_activity_details(message: object, record: object | None) -> str:
+    """Keep useful result/error text while omitting customer/job identifiers."""
+    detail = str(message or "")
+    if record is not None:
+        private_names = {
+            str(getattr(record, "customer_name", "") or ""),
+            str(getattr(record, "quickbooks_customer_name", "") or ""),
+            str(getattr(record, "quickbooks_job_name", "") or ""),
+        }
+        for private_name in sorted(private_names, key=len, reverse=True):
+            if private_name:
+                detail = re.sub(re.escape(private_name), "[customer/job]", detail, flags=re.IGNORECASE)
+    return detail[:1000]
+
+
+def _watch_policy_progress(runtime: Runtime, operation: Operation, stop: Event) -> None:
+    """Log the policy number currently being processed without exposing its row."""
+    company = runtime.config.company.display_name
+    seen: set[str] = set()
+    title = _activity_title(operation.value)
+    while not stop.wait(0.5):
+        progress = runtime.progress()
+        source_id = str(progress.get("current") or "")
+        if not progress.get("active") or not source_id or source_id in seen:
+            continue
+        seen.add(source_id)
+        record = runtime.records.get(source_id)
+        if record is not None:
+            shared_activity(
+                f"{title} in progress",
+                "QuickBooks is processing this policy.",
+                company=company,
+                policy_number=record.invoice_number,
+            )
 
 
 def _drain_log() -> None:
@@ -133,10 +207,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             else:
                 self._json({"error": "Unknown endpoint."}, HTTPStatus.NOT_FOUND)
         except (WebSourceError, EditError, ValueError, json.JSONDecodeError) as exc:
-            shared_activity("Request refused", "A dashboard request was rejected; see local History for details.")
+            shared_activity(
+                "Request refused", str(exc)[:1000],
+                company=self.server.runtime.config.company.display_name,
+            )
             self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except Exception as exc:  # never let the dashboard hang on a traceback
-            shared_activity("Application error", "A dashboard request failed; see local History for details.")
+            shared_activity(
+                "Application error", str(exc)[:1000],
+                company=self.server.runtime.config.company.display_name,
+            )
             self._json({"error": f"Unexpected server error: {exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     # --- endpoints -----------------------------------------------------------
@@ -157,6 +237,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         shared_activity(
             "Policies refreshed",
             f"{summary['loaded_rows']} rows loaded; {summary['skipped_rows']} skipped.",
+            company=self.server.runtime.config.company.display_name,
         )
         return {"import": summary, "records": self.server.runtime.records_payload()}
 
@@ -186,6 +267,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         shared_activity(
             "Bulk edit",
             f"{len(result['updated'])} rows updated; {len(result['failed'])} refused.",
+            company=self.server.runtime.config.company.display_name,
         )
         return result
 
@@ -220,7 +302,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except QuickBooksError as exc:
             raise ValueError(str(exc)) from exc
         log(f"Now pointed at {switched['company']} ({switched['file_path']})")
-        shared_activity("QuickBooks company changed", "The selected company file changed.")
+        shared_activity(
+            "QuickBooks company changed", "The selected company file changed.",
+            company=self.server.runtime.config.company.display_name,
+        )
         return {"company": switched, "health": self.server.runtime.health()}
 
     def _source(self) -> dict[str, object]:
@@ -228,7 +313,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         payload = self._read_json()
         changed = self.server.runtime.use_data_source(str(payload.get("url", "")))
         log(f"Data source changed, {changed['rows']} rows loaded")
-        shared_activity("Data source changed", f"{changed['rows']} rows loaded.")
+        shared_activity(
+            "Data source changed", f"{changed['rows']} rows loaded.",
+            company=self.server.runtime.config.company.display_name,
+        )
         return {"source": changed, "health": self.server.runtime.health()}
 
     def _invoice_needed(self) -> dict[str, object]:
@@ -257,20 +345,99 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             str(source_id): str(list_id)
             for source_id, list_id in vendor_choices.items()
         }
-        shared_activity("Work started", f"{len(ids)} record(s); action: {operation.value}.")
-        results = self.server.runtime.process(
-            [str(value) for value in ids], operation, cleaned_vendor_choices
+        runtime = self.server.runtime
+        company = runtime.config.company.display_name
+        shared_activity(
+            "Work started", f"{len(ids)} record(s); action: {operation.value}.",
+            company=company,
         )
+        stop_progress = Event()
+        progress_watcher = Thread(
+            target=_watch_policy_progress,
+            args=(runtime, operation, stop_progress),
+            daemon=True,
+        )
+        progress_watcher.start()
+        try:
+            results = runtime.process(
+                [str(value) for value in ids], operation, cleaned_vendor_choices
+            )
+        finally:
+            stop_progress.set()
+        for result in results:
+            source_id = str(result.get("source_id", ""))
+            record = runtime.records.get(source_id)
+            outcome_operation = str(result.get("operation") or operation.value)
+            message = str(result.get("message", ""))
+            policy_number = (
+                str(getattr(record, "invoice_number", "") or "")
+                if record is not None
+                else str(result.get("invoice_ref_number", "") or "")
+            )
+            status = str(result.get("status", ""))
+            dry_run = bool(result.get("dry_run", False))
+            details = _safe_activity_details(message, record)
+            invoice_events: list[tuple[str, str]] = []
+            steps = result.get("steps", [])
+            if outcome_operation == Operation.CREATE_INVOICE.value and isinstance(steps, list):
+                for step in steps:
+                    premium_match = re.search(
+                        r"^(Premium|Commission|Fees) invoice .+?\s(created|updated)\s+on\b",
+                        str(step),
+                        flags=re.IGNORECASE,
+                    )
+                    if premium_match:
+                        invoice_events.append(
+                            (f"{premium_match.group(1).title()} invoice {premium_match.group(2).lower()}",
+                             "Prepared in test mode; not sent to QuickBooks."
+                             if dry_run else "Transaction recorded in QuickBooks.")
+                        )
+                        continue
+                    invoice_match = re.search(
+                        r"^Invoice .+?\s(created|already existed)\b",
+                        str(step),
+                        flags=re.IGNORECASE,
+                    )
+                    if invoice_match:
+                        verb = invoice_match.group(1).lower()
+                        invoice_events.append(
+                            ("Invoice already exists" if verb == "already existed" else "Invoice created",
+                             "Prepared in test mode; not sent to QuickBooks."
+                             if dry_run else "Transaction recorded in QuickBooks.")
+                        )
+            for event, event_details in invoice_events:
+                shared_activity(
+                    event,
+                    event_details,
+                    company=company,
+                    policy_number=policy_number,
+                )
+            if not invoice_events or status.casefold() in {"failed", "needs_review"}:
+                shared_activity(
+                    _activity_event(outcome_operation, status, message, dry_run),
+                    details,
+                    company=company,
+                    policy_number=policy_number,
+                )
+            if "warning" in message.casefold():
+                shared_activity(
+                    "Invoice warning",
+                    details,
+                    company=company,
+                    policy_number=policy_number,
+                )
         log(f"Processed {len(results)} policy record(s) [{operation.value}]:")
         for result in results:
             log(f"  [{result.get('status')}] {result.get('label')} - {result.get('message')}")
-        failed = sum(
-            1 for result in results
-            if str(result.get("status", "")).casefold() in {"failed", "error"}
+        counts = Counter(str(result.get("status", "unknown")) for result in results)
+        summary = "; ".join(
+            f"{count} {status.replace('_', ' ')}"
+            for status, count in sorted(counts.items())
         )
         shared_activity(
             "Work finished",
-            f"{len(results)} record(s) processed; {len(results) - failed} succeeded; {failed} failed.",
+            f"{len(results)} record(s) processed" + (f": {summary}." if summary else "."),
+            company=company,
         )
         return {
             "results": results,

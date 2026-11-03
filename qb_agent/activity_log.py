@@ -1,12 +1,12 @@
 """Optional shared activity logging through the existing Google Sheets service account.
 
-Only coarse operational events are sent. Customer names, policy numbers,
-QuickBooks messages, company paths, and field values stay in local History.
+Operational results, policy numbers, and sanitized QuickBooks messages are sent.
+Customer/job names, company paths, and full sheet row values stay local.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from getpass import getuser
 from pathlib import Path
 from queue import Empty, Full, Queue
@@ -16,9 +16,9 @@ import urllib.parse
 
 from .gsheets import Sheets
 
-LOG_TAB = "App Activity Logs"
-HEADERS = ("Timestamp (UTC)", "Computer", "Windows user", "Activity", "Details")
-MAX_ROWS = 250
+LOG_TAB = "QuickBook Logs"
+HEADERS = ("Pakistan Time", "Company", "Computer", "Windows user", "Policy Number", "Activity", "Details")
+MAX_ROWS = 1000
 
 
 class ActivityLog:
@@ -31,7 +31,7 @@ class ActivityLog:
             self.key_file and self.spreadsheet_id and Path(self.key_file).is_file()
         )
         self._sheets = Sheets(self.key_file, self.spreadsheet_id) if self.enabled else None
-        self._queue: Queue[tuple[str, str, str, str, str]] = Queue(maxsize=2000)
+        self._queue: Queue[tuple[str, str, str, str, str, str, str]] = Queue(maxsize=2000)
         self._lock = Lock()
         self._started = False
         self._last_error = ""
@@ -42,15 +42,25 @@ class ActivityLog:
         self._started = True
         Thread(target=self._run, name="GoogleSheetActivityLog", daemon=True).start()
 
-    def record(self, event: str, details: str = "") -> None:
+    def record(
+        self,
+        event: str,
+        details: str = "",
+        *,
+        company: str = "",
+        policy_number: str = "",
+    ) -> None:
         if not self.enabled:
             return
+        pakistan = timezone(timedelta(hours=5), "PKT")
         row = (
-            datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            datetime.now(timezone.utc).astimezone(pakistan).isoformat(timespec="seconds"),
+            str(company)[:150],
             socket.gethostname()[:100],
             getuser()[:100],
+            str(policy_number)[:100],
             str(event)[:120],
-            str(details)[:300],
+            str(details)[:1000],
         )
         try:
             self._queue.put_nowait(row)
@@ -77,13 +87,13 @@ class ActivityLog:
                 "/values:batchUpdate",
                 {
                     "valueInputOption": "RAW",
-                    "data": [{"range": f"'{LOG_TAB}'!A1:E1", "values": [list(HEADERS)]}],
+                    "data": [{"range": f"'{LOG_TAB}'!A1:G1", "values": [list(HEADERS)]}],
                 },
             )
 
-    def _append(self, rows: list[tuple[str, str, str, str, str]]) -> None:
+    def _append(self, rows: list[tuple[str, str, str, str, str, str, str]]) -> None:
         assert self._sheets is not None
-        encoded = urllib.parse.quote(f"'{LOG_TAB}'!A:E", safe="")
+        encoded = urllib.parse.quote(f"'{LOG_TAB}'!A:G", safe="")
         self._sheets._call(
             f"/values/{encoded}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS",
             {"values": [list(row) for row in rows]},
@@ -133,7 +143,7 @@ class ActivityLog:
             return {
                 "enabled": True,
                 "rows": rows,
-                "message": self._last_error or f"Refreshing every 5 seconds · showing up to {MAX_ROWS} recent events.",
+                "message": self._last_error or f"Refreshes every 5 seconds · latest {MAX_ROWS} events shown; all entries remain in the sheet.",
             }
         except Exception as exc:
             return {
