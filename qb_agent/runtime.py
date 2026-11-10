@@ -147,7 +147,11 @@ class Runtime:
         self._status_columns: dict[str, dict[str, int]] = {}
         # tab label -> {policy key: real sheet row}, built only when the rows
         # come from the published link and so carry no true row number.
-        self._row_index: dict[str, dict[tuple[str, str, str], int]] = {}
+        self._row_index: dict[str, dict[tuple[str, str, str], tuple[int, dict[str, str]]]] = {}
+        # Keys seen more than once in a tab cannot safely be used to update
+        # the sheet. LOB is deliberately not a row-identity tie-breaker.
+        self._ambiguous_sheet_rows: dict[str, set[tuple[str, str, str]]] = {}
+        self._ambiguous_sheet_errors: dict[str, str] = {}
         self._lookup_at = 0.0
         # (policy, status column) -> when this machine last finished writing
         # that cell. A read of the sheet that began before then may have been
@@ -1077,7 +1081,15 @@ class Runtime:
                             "but under a shortened number, so it could not be confirmed. Check "
                             "this is the right customer."
                         )
-                        candidates = old_matches
+                        key = record.customer_name.casefold()
+                        if key not in candidate_cache:
+                            candidate_cache[key] = list(
+                                gateway.customer_candidates(record.customer_name)
+                            )
+                        name_candidates = candidate_cache[key]
+                        # Prefer accounts matching the sheet's name; retain the
+                        # existing expiring-policy choices as a fallback.
+                        candidates = name_candidates or old_matches
                         ambiguous.append({
                             "source_id": record.source_id,
                             "customer_name": record.customer_name,
@@ -1146,9 +1158,9 @@ class Runtime:
                         continue
                     reason = ""   # worded below, once it is known what was found
 
-                key = record.quickbooks_customer_name.casefold()
+                key = record.customer_name.casefold()
                 if key not in candidate_cache:
-                    candidate_cache[key] = list(gateway.customer_candidates(record.quickbooks_customer_name))
+                    candidate_cache[key] = list(gateway.customer_candidates(record.customer_name))
                 candidates = candidate_cache[key]
                 if not candidates and not reason:
                     # A reason already set means something went wrong - the
@@ -1211,10 +1223,10 @@ class Runtime:
         # name, which finds nothing and leaves the picker with no accounts to
         # offer - when every one of that company's locations was there to be
         # found under its own name.
-        key = f"company:{record.quickbooks_customer_name.casefold()}"
+        key = f"company:{record.customer_name.casefold()}"
         if key not in candidate_cache:
             candidate_cache[key] = list(
-                gateway.customer_candidates(record.quickbooks_customer_name)
+                gateway.customer_candidates(record.customer_name)
             )
         candidates = candidate_cache[key]
         corporation = _location_words(record.customer_name) - _LOCATION_FILLERS
@@ -1328,9 +1340,7 @@ class Runtime:
                 row = self._sheet_row(record)
                 title = self.config.google_sheet.tab_titles.get(label, "")
                 if row < 1 or not title:
-                    raise SheetsError(
-                        f"The row for '{record.customer_name}' could not be identified in the sheet."
-                    )
+                    raise SheetsError(self._sheet_row_error(record))
                 values = {
                     "qb_customer_target": target,
                     "qb_customer_id": list_id,
@@ -1863,8 +1873,32 @@ class Runtime:
         """
         if self.config.google_sheet.read_rows:
             return record.row_number
-        found = self._row_lookup(self._tab_label(record.source_tab)).get(_policy_key(record))
-        return found[0] if found else 0
+        label = self._tab_label(record.source_tab)
+        key = _policy_key(record)
+        found = self._row_lookup(label).get(key)
+        if found:
+            return found[0]
+        if key in self._ambiguous_sheet_rows.get(label, set()):
+            self.sheet_write_error = self._sheet_row_error(record)
+        return 0
+
+    def _sheet_row_error(self, record: WorkRecord) -> str:
+        """Explain why this policy cannot be safely written back to its row."""
+        label = self._tab_label(record.source_tab)
+        key = _policy_key(record)
+        if (
+            not self.config.google_sheet.read_rows
+            and key in self._ambiguous_sheet_rows.get(label, set())
+        ):
+            effective_date = record.invoice_date.isoformat() if record.invoice_date else "(blank)"
+            return (
+                f"Duplicate policy row: customer '{record.customer_name}', policy "
+                f"'{record.invoice_number}', and effective date '{effective_date}' "
+                "identify more than one row in Google Sheets. LOB is not used to "
+                "choose a row. Correct the duplicate policy/effective-date entry; "
+                "no sheet update was made."
+            )
+        return f"The row for '{record.customer_name}' could not be identified in the sheet."
 
     def honour_resets(self, targets: list[tuple[str, str]]) -> int:
         """Act on somebody typing Pending into the sheet.
@@ -2038,13 +2072,20 @@ class Runtime:
         """
         fresh = (monotonic() - self._lookup_at) < LOOKUP_SECONDS
         if not force and fresh and label in self._row_index:
+            self._restore_duplicate_sheet_error()
             return self._row_index[label]
         title = self.config.google_sheet.tab_titles.get(label, "")
         if not title:
+            self._ambiguous_sheet_rows[label] = set()
+            self._ambiguous_sheet_errors.pop(label, None)
+            self._restore_duplicate_sheet_error()
             return {}
         try:
             grid = self._sheets().read(title)
         except SheetsError as exc:
+            self._ambiguous_sheet_rows[label] = set()
+            self._ambiguous_sheet_errors.pop(label, None)
+            self._restore_duplicate_sheet_error()
             self.sheet_write_error = str(exc)
             return {}
         self._status_columns[label] = sheet_columns(grid, tab=label)
@@ -2056,6 +2097,9 @@ class Runtime:
             # be read or written.
             found = build_records(label, grid, every_row=True)
         except WebSourceError:
+            self._ambiguous_sheet_rows[label] = set()
+            self._ambiguous_sheet_errors.pop(label, None)
+            self._restore_duplicate_sheet_error()
             return {}
         seen: dict[tuple[str, str, str], tuple[int, dict[str, str]]] = {}
         ambiguous: set[tuple[str, str, str]] = set()
@@ -2064,18 +2108,33 @@ class Runtime:
             if key in seen:
                 ambiguous.add(key)
             held = dict(entry.extra)
-            seen[key] = (
+            location = (
                 entry.row_number,
                 {
                     field: str(held.get(field, "")).strip()
                     for field in (*STATUS_FIELDS, *RESOLUTION_FIELDS)
                 },
             )
+            seen[key] = location
         for key in ambiguous:
-            seen.pop(key, None)      # two rows look the same; write to neither
+            seen.pop(key, None)      # refuse every duplicate customer/policy/date key
         self._row_index[label] = seen
+        self._ambiguous_sheet_rows[label] = ambiguous
+        if ambiguous:
+            duplicate = next(entry for entry in found.records if _policy_key(entry) in ambiguous)
+            self._ambiguous_sheet_errors[label] = self._sheet_row_error(duplicate)
+        else:
+            self._ambiguous_sheet_errors.pop(label, None)
+        self._restore_duplicate_sheet_error()
         self._lookup_at = monotonic()
         return seen
+
+    def _restore_duplicate_sheet_error(self) -> None:
+        error = next(iter(self._ambiguous_sheet_errors.values()), "")
+        if error:
+            self.sheet_write_error = error
+        elif self.sheet_write_error.startswith("Duplicate policy row:"):
+            self.sheet_write_error = ""
 
     def _take_lock(self, seconds: float) -> None:
         """Wait a while for the app to be free, then explain who is holding it.

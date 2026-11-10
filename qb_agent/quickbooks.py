@@ -57,6 +57,38 @@ def _search_token(value: str) -> str:
     return words[0] if words else ""
 
 
+def _customer_name_parts(value: str) -> list[str]:
+    """Company-name alternatives in compound entries such as "A LLC / B LLC DBA C"."""
+    parts = re.split(r"/|\bDBA\b", value, flags=re.IGNORECASE)
+    found: list[str] = []
+    for part in parts:
+        words = _normal_name(part).split()
+        if not words:
+            continue
+        end = next(
+            (index + 1 for index, word in enumerate(words) if index >= 1 and word in _ENTITY_SUFFIXES),
+            len(words),
+        )
+        name = " ".join(words[:end])
+        if name and name not in found:
+            found.append(name)
+    return found
+
+
+def _customer_search_tokens(value: str) -> list[str]:
+    """Search QuickBooks by each account-name start, including short initials like IQ."""
+    tokens: list[str] = []
+    for part in _customer_name_parts(value):
+        words = [
+            word for word in part.split()
+            if word not in _ENTITY_SUFFIXES and word not in {"a", "an", "the", "of", "and"}
+        ]
+        for word in words[:2]:
+            if len(word) >= 2 and word not in tokens:
+                tokens.append(word)
+    return tokens[:8]
+
+
 # What follows a company's name rather than being part of it. A name is cut
 # at the first of these, so everything a business trades as sits under one
 # heading: "Dpeg Retail LLC 1903 Hamilton Rd" belongs to "Dpeg Retail LLC".
@@ -300,7 +332,20 @@ def _rank_customers(name: str, customers: list["CustomerEntity"]) -> list["Custo
         customers,
         key=lambda entity: (not household(entity), -score(entity), entity.full_name.casefold()),
     )
-    return [one for one in ranked if household(one) or score(one) >= 1.15][:25]
+    legacy = [one for one in ranked if household(one) or score(one) >= 1.15]
+    prefixes = _customer_name_parts(name)
+    direct = [
+        one for one in customers
+        if any(
+            _normal_name(one.full_name) == prefix
+            or _normal_name(one.full_name).startswith(prefix + " ")
+            for prefix in prefixes
+        )
+    ]
+    if direct:
+        direct_ids = {one.list_id for one in direct}
+        return [one for one in ranked if one.list_id in direct_ids][:25]
+    return legacy[:25]
 
 
 def fees_memo(policy_number: str) -> str:
@@ -621,23 +666,27 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         customers belong in the location picker; jobs are handled after the
         customer has been chosen.
         """
-        token = _search_token(name)
-        if not token:
-            return []
-        xml = self.transport.request(self.builder.customer_search(token))
-        self._raise_on_error(xml)
-        found = [
-            CustomerEntity(
-                response.list_id or "",
-                response.full_name or "",
-                response.edit_sequence or "",
-                response.notes or "",
-                response.parent_list_id or "",
-            )
-            for response in parse_customer_matches(xml)
-            if response.list_id and response.full_name and ":" not in response.full_name
-        ]
-        return _rank_customers(name, found)
+        tokens = _customer_search_tokens(name)
+        if not tokens:
+            token = _search_token(name)
+            tokens = [token] if token else []
+        found: dict[str, CustomerEntity] = {}
+        for token in tokens:
+            xml = self.transport.request(self.builder.customer_search(token))
+            self._raise_on_error(xml)
+            for response in parse_customer_matches(xml):
+                if response.list_id and response.full_name and ":" not in response.full_name:
+                    found.setdefault(
+                        response.list_id,
+                        CustomerEntity(
+                            response.list_id,
+                            response.full_name,
+                            response.edit_sequence or "",
+                            response.notes or "",
+                            response.parent_list_id or "",
+                        ),
+                    )
+        return _rank_customers(name, list(found.values()))
 
     def customer_jobs(self, parent: CustomerEntity) -> list[CustomerEntity]:
         """Return only jobs directly below the already-selected customer."""
