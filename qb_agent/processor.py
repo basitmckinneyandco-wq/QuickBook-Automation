@@ -707,7 +707,7 @@ class Processor:
                     steps=list(steps),
                 )
                 return self._policy_invoice(
-                    gateway, record, target, steps, operation.invoice_kind
+                    gateway, record, target, steps, operation.invoice_kind, customer.list_id
                 )
 
             if operation is Operation.CREATE_CUSTOMER or record.action is Action.CUSTOMER_ONLY:
@@ -768,7 +768,8 @@ class Processor:
             )
 
     def _policy_invoice(
-        self, gateway, record: WorkRecord, target, steps: list[str], kind: str
+        self, gateway, record: WorkRecord, target, steps: list[str], kind: str,
+        parent_customer_list_id: str = "",
     ) -> ProcessingResult:
         """Raise one kind of invoice against the policy's job.
 
@@ -776,11 +777,9 @@ class Processor:
         the lookup is by kind - otherwise one would be mistaken for the other
         and updated in its place.
 
-        The effective date goes with it. Some accounts keep one policy number
-        across renewals, and by the number alone last year's invoice answers
-        to this year's row: a 2026 renewal was reopening the 2025 invoice and
-        overwriting it. An invoice has to fall in the year being sent before
-        it counts as this policy's.
+        The invoice type, exact effective date, policy number, and customer
+        identify this invoice. Its previous LOB job does not change that
+        identity; the existing invoice is moved to the current job in place.
         """
         spec = _INVOICE_DETAIL[kind]
         existing = gateway.find_policy_invoice(
@@ -789,8 +788,10 @@ class Processor:
             job_list_id=target.list_id,
             policy_number=record.invoice_number,
             policy_year=record.invoice_date.year if record.invoice_date else 0,
+            policy_date=record.invoice_date.isoformat() if record.invoice_date else "",
+            parent_customer_list_id=parent_customer_list_id,
         )
-        if existing is not None and existing.customer_list_id == target.list_id:
+        if existing is not None:
             # Sending again is how an edited row is corrected, so the existing
             # invoice is brought up to date rather than left as it was.
             invoice, notes = gateway.update_policy_invoice(

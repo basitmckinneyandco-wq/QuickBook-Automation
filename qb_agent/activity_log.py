@@ -11,6 +11,7 @@ from getpass import getuser
 from pathlib import Path
 from queue import Empty, Full, Queue
 from threading import Lock, Thread
+import re
 import socket
 import urllib.parse
 
@@ -138,11 +139,20 @@ class ActivityLog:
                 for row in values[1:]
                 if any(str(cell).strip() for cell in row)
             ]
+            summary = {
+                "premium_created": sum(row.get("Activity") == "Premium invoice created" for row in rows),
+                "commission_created": sum(row.get("Activity") == "Commission invoice created" for row in rows),
+                "fees_created": sum(row.get("Activity") == "Fees invoice created" for row in rows),
+                "bills_created": sum(row.get("Activity") == "Bill created" for row in rows),
+                "failures": sum(bool(re.search(r"fail|error", str(row.get("Activity", "")), re.I)) for row in rows),
+                "total": len(rows),
+            }
             rows = rows[-MAX_ROWS:]
             rows.reverse()
             return {
                 "enabled": True,
                 "rows": rows,
+                "summary": summary,
                 "message": self._last_error or f"Refreshes every 5 seconds · latest {MAX_ROWS} events shown; all entries remain in the sheet.",
             }
         except Exception as exc:

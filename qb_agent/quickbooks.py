@@ -371,6 +371,8 @@ class QuickBooksGateway(Protocol):
         job_list_id: str = "",
         policy_number: str = "",
         policy_year: int = 0,
+        policy_date: str = "",
+        parent_customer_list_id: str = "",
     ) -> InvoiceEntity | None: ...
     def create_policy_invoice(
         self, record: WorkRecord, job_list_id: str, kind: str
@@ -748,17 +750,17 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         job_list_id: str = "",
         policy_number: str = "",
         policy_year: int = 0,
+        policy_date: str = "",
+        parent_customer_list_id: str = "",
     ) -> InvoiceEntity | None:
         """The invoice of this kind for this policy, if one already exists.
 
         A policy's premium and commission invoices share its number, so the
         A/R account is what tells them apart.
 
-        Some accounts keep one policy number from year to year, so the number
-        alone finds last year's invoice as readily as this year's - and the
-        renewal was reopening 2025's invoice and overwriting it rather than
-        raising 2026's. The effective date settles it: an invoice counts as
-        this policy's only if it falls in the same year.
+        The policy number and exact effective date identify the invoice. This
+        keeps renewals with a reused policy number distinct. The caller also
+        limits matches to the same parent customer before reusing the invoice.
 
         Fees invoices are all numbered "Fee", so the number says nothing about
         which policy one belongs to. They are looked for on the policy's job
@@ -768,17 +770,38 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         """
         wanted = _fold(self.kind_config(kind).ar_account)
 
-        def same_year(match: dict) -> bool:
-            """Whether this invoice belongs to the year being sent.
-
-            Without a year to compare against - a row with no effective date -
-            every invoice qualifies, which is what happened before the date
-            was asked for at all.
-            """
+        def same_policy_date(match: dict) -> bool:
+            """Match the exact effective date when the row supplies one."""
+            found_date = (match.get("txn_date", "") or "").strip()[:10]
+            if policy_date:
+                # An unreadable QB date is not safe evidence for reusing an invoice.
+                return found_date == policy_date
             if not policy_year:
                 return True
-            found = _invoice_year(match.get("txn_date", ""))
-            return found == 0 or found == policy_year
+            found_year = _invoice_year(found_date)
+            return found_year == 0 or found_year == policy_year
+
+        def same_policy_number(match: dict) -> bool:
+            """Verify the full policy when QuickBooks stores an 11-character ref."""
+            found_ref = _fold(match.get("ref_number", ""))
+            wanted_ref = _fold(ref_number)
+            if found_ref == _fold(policy_number or ref_number):
+                return True
+            if found_ref != wanted_ref or not policy_number:
+                return False
+            return _fold(match.get("memo", "")) == _fold(f"Policy #: {policy_number}")
+
+        def belongs_to_customer(match: dict) -> bool:
+            """Limit reuse to this customer, while permitting its LOB job to change."""
+            if not parent_customer_list_id:
+                return True
+            list_id = match.get("customer_list_id", "")
+            if list_id == parent_customer_list_id:
+                return True
+            if not list_id:
+                return False
+            linked = self.find_customer_by_id(list_id)
+            return bool(linked and linked.parent_list_id == parent_customer_list_id)
 
         if kind == "fees" and job_list_id:
             xml = self.transport.request(self.builder.invoice_query_for_job(job_list_id))
@@ -791,7 +814,7 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
                     continue
                 if _fold(match["memo"]) != memo:
                     continue
-                if not same_year(match):
+                if not same_policy_date(match):
                     continue
                 return _entity(match, ref_number)
         xml = self.transport.request(self.builder.invoice_query(ref_number))
@@ -799,7 +822,10 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
         candidates = [
             match
             for match in parse_invoice_matches(xml)
-            if (not wanted or _fold(match["ar_account"]) == wanted) and same_year(match)
+            if (not wanted or _fold(match["ar_account"]) == wanted)
+            and same_policy_number(match)
+            and same_policy_date(match)
+            and belongs_to_customer(match)
         ]
         if not candidates:
             return None
@@ -813,6 +839,16 @@ class DesktopQuickBooksGateway(AbstractContextManager["DesktopQuickBooksGateway"
             for match in candidates:
                 if match["customer_list_id"] == job_list_id:
                     return _entity(match, ref_number)
+        if parent_customer_list_id:
+            # Return the unique same-customer candidate, even when it is on an
+            # old LOB job; InvoiceMod can move it to the current job in place.
+            # Refuse ambiguous duplicates rather than modifying an arbitrary one.
+            if len(candidates) > 1:
+                raise QuickBooksError(
+                    f"More than one {kind} invoice matches policy '{policy_number or ref_number}' "
+                    f"and Effective Date '{policy_date}'. No invoice was updated."
+                )
+            return _entity(candidates[0], ref_number) if candidates else None
         return _entity(candidates[0], ref_number)
 
     def _load_vendors(self) -> list[VendorEntity]:
@@ -1594,6 +1630,8 @@ class DryRunQuickBooksGateway(AbstractContextManager["DryRunQuickBooksGateway"])
         job_list_id: str = "",
         policy_number: str = "",
         policy_year: int = 0,
+        policy_date: str = "",
+        parent_customer_list_id: str = "",
     ) -> InvoiceEntity | None:
         # Keyed by year as well, so a dry run shows the same thing a real send
         # would do: a renewal under last year's number raises its own invoice.
