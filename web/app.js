@@ -148,6 +148,12 @@ const EXTRA_COLUMNS = [
         cell.append(live);
         return cell;
       }
+      if (record.policy_number_error) {
+        const duplicate = tag("Duplicate policy", "failed");
+        duplicate.title = record.policy_number_error;
+        duplicate.append(document.createTextNode(" ⓘ"));
+        cell.append(duplicate);
+      }
       // One badge per kind this row can raise, each prefixed so several
       // greens are still readable. Fees only appear where there is a fee.
       for (const kind of invoiceKindsFor(record).filter((entry) => entry.operation)) {
@@ -397,6 +403,35 @@ function moneyValue(raw) {
 
 function invoiceKindsFor(record) {
   return INVOICE_KINDS.filter((kind) => kind.applies(record));
+}
+
+/** Recompute duplicate flags after edits, without waiting for a sheet refresh. */
+function refreshDuplicatePolicyFlags() {
+  const groups = new Map();
+  for (const record of state.records) {
+    delete record.policy_number_error;
+    const customer = String(record.customer_name || "").trim().replace(/\s+/g, " ").toLowerCase();
+    const policy = String(record.invoice_number || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!customer || !policy) continue;
+    const key = JSON.stringify([customer, policy, record.invoice_date || ""]);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(record);
+  }
+  for (const rows of groups.values()) {
+    if (rows.length < 2) continue;
+    const first = rows[0];
+    const date = first.invoice_date || "(blank)";
+    const lobs = [...new Set(rows.map((row) => String(row.job_name || "").trim()).filter(Boolean))].sort();
+    const detail = lobs.length ? " Line of Business entries: " + lobs.join(", ") + "." : "";
+    const message = "Duplicate policy number '" + first.invoice_number + "' for customer '"
+      + first.customer_name + "' and effective date '" + date + "'. "
+      + "That policy number is repeated across multiple rows." + detail + " "
+      + "Policy numbers must be unique for the same customer and effective date. "
+      + "Correct the policy number in Google Sheets, then refresh; invoice and bill "
+      + "creation is blocked for these rows. LOB is shown for context only and is not "
+      + "used to choose a row.";
+    for (const row of rows) row.policy_number_error = message;
+  }
 }
 
 const COLUMN_ORDER_KEY = "qb-column-order";
@@ -1568,6 +1603,7 @@ function playRowTransition(built, before) {
 }
 
 function renderTable() {
+  refreshDuplicatePolicyFlags();
   renderHead();
   const rows = visibleRecords();
   const shown = rows.slice(0, RENDER_CAP);
@@ -1858,7 +1894,8 @@ function invoiceBlockers(records, kinds) {
 }
 
 function choiceReasons(record, kind) {
-  const reasons = record[`${kind.key}_reasons`] || [];
+  const reasons = [...(record[`${kind.key}_reasons`] || [])];
+  if (record.policy_number_error) reasons.unshift(record.policy_number_error);
   if (
     kind.key !== "bill"
     || !state.invoicing?.kinds?.has("premium")
@@ -2024,6 +2061,11 @@ function renderInvoiceChoice() {
       ).length,
     0
   );
+  const duplicateSends = runnable.reduce(
+    (total, kind) =>
+      total + invoiceTargets(kind, records).filter((record) => record.policy_number_error).length,
+    0
+  );
 
   // Only the ticked kinds' problems are shown, so unticking one clears its own.
   const warning = $("invoiceWarning");
@@ -2035,18 +2077,22 @@ function renderInvoiceChoice() {
     : "";
 
   const create = $("invoiceCreate");
-  create.disabled = readySends === 0;
+  create.disabled = readySends === 0 && duplicateSends === 0;
   const includesBill = runnable.some((kind) => kind.key === "bill");
-  create.textContent = readySends > 1
-    ? `Create ${readySends} ${includesBill ? "items" : "invoices"}`
-    : includesBill && runnable.length === 1 ? "Create bill" : "Create invoice";
+  create.textContent = readySends === 0 && duplicateSends > 0
+    ? "Flag duplicate policies"
+    : readySends > 1
+      ? "Create " + readySends + " " + (includesBill ? "items" : "invoices")
+      : includesBill && runnable.length === 1 ? "Create bill" : "Create invoice";
   $("invoiceNote").textContent = !choice.kinds.size
     ? "Tick at least one invoice or bill to create."
     : runnable.length === 0
       ? "That invoice is not set up yet."
-      : readySends === 0
-        ? "Fix the missing details above first, then try again."
-        : "Invoices run first; a selected bill follows on the same saved customer/job.";
+      : readySends === 0 && duplicateSends > 0
+        ? "No QuickBooks transaction will be sent for duplicate policies. Submit to mark the sheet rows for review."
+        : readySends === 0
+          ? "Fix the missing details above first, then try again."
+          : "Invoices run first; a selected bill follows on the same saved customer/job.";
 
   for (const label of document.querySelectorAll(".invoice-choice")) {
     label.classList.toggle("selected", choice.kinds.has(label.dataset.kind));
@@ -2067,13 +2113,19 @@ async function createInvoice() {
   );
   const records = invoicingRecords();
   if (!kinds.length || !records.length) return;
-  if (state.health && state.health.writes_enabled && !(await quickBooksIsReady())) {
+
+  const hasSendable = kinds.some((kind) =>
+    invoiceTargets(kind, records).some(
+      (record) => !record.policy_number_error && !choiceReasons(record, kind).length
+    )
+  );
+  if (hasSendable && state.health && state.health.writes_enabled && !(await quickBooksIsReady())) {
     toast("Nothing was sent. Close what QuickBooks is waiting on, then send again.", true);
     return;
   }
 
-  // Each kind goes only to the rows it applies to, so ticking Fees on a mixed
-  // selection bills the policies that have a fee and leaves the rest alone.
+  // Keep duplicate rows in the request so the server can reject them and write
+  // Needs review to every matching sheet row. The server never sends them to QB.
   const batches = kinds
     .map((kind) => ({
       kind,
@@ -2084,41 +2136,43 @@ async function createInvoice() {
   let vendorChoices = {};
   const billBatch = batches.find((batch) => batch.kind.key === "bill");
   if (billBatch) {
-    const button = $("invoiceCreate");
-    const doneLooking = startLookup(button, billBatch.ids.length, "carriers");
-    try {
-      const review = await billVendorResolutions(billBatch.ids);
-      doneLooking();
-      if ((review.unknown_ids || []).length) {
-        toast(`${review.unknown_ids.length} policies are no longer loaded. Refresh and try again.`, true);
+    const reviewIds = billBatch.ids.filter((id) => {
+      const record = records.find((entry) => entry.source_id === id);
+      return record && !record.policy_number_error && !choiceReasons(record, billBatch.kind).length;
+    });
+    if (reviewIds.length) {
+      const button = $("invoiceCreate");
+      const doneLooking = startLookup(button, reviewIds.length, "carriers");
+      try {
+        const review = await billVendorResolutions(reviewIds);
+        doneLooking();
+        if ((review.unknown_ids || []).length) {
+          toast(review.unknown_ids.length + " policies are no longer loaded. Refresh and try again.", true);
+          return;
+        }
+        if ((review.review || []).length) {
+          const selected = await chooseQuickBooksVendors(
+            review.review, review.vendors || [], review.missing || []
+          );
+          if (!selected) return;
+          vendorChoices = selected;
+        }
+      } catch (error) {
+        doneLooking();
+        toast(error.message, true);
         return;
       }
-      if ((review.review || []).length) {
-        const selected = await chooseQuickBooksVendors(
-          review.review, review.vendors || [], review.missing || []
-        );
-        if (!selected) return;
-        vendorChoices = selected;
-      }
-    } catch (error) {
-      doneLooking();
-      toast(error.message, true);
-      return;
     }
   }
 
   closeInvoicePicker();
-  if (!batches.length) return;
-
-  if (records.length === 1) {
+  const oneValidRecord = records.length === 1 && !records[0].policy_number_error;
+  if (oneValidRecord) {
     const sourceId = records[0].source_id;
-    // One at a time: QuickBooks tolerates a single session, and actOnPolicy
-    // already queues. The button is re-found each pass because every send
-    // re-renders the row.
     for (const batch of batches) {
       const current = state.records.find((entry) => entry.source_id === sourceId);
       const busy =
-        current && DONE.has(current[`${batch.kind.key}_status`]) ? "Updating…" : "Creating…";
+        current && DONE.has(current[batch.kind.key + "_status"]) ? "Updating…" : "Creating…";
       await actOnPolicy(
         sourceId, batch.kind.operation, rowInvoiceButton(sourceId), busy,
         batch.kind.key === "bill" ? vendorChoices : {}
@@ -2128,10 +2182,24 @@ async function createInvoice() {
   }
 
   for (const batch of batches) {
-    await processBatch(batch.kind.operation, batch.ids, "invoiceButton", {
-      noun: `${batch.ids.length} ${batch.kind.label.toLowerCase()}${
-        batch.ids.length === 1 ? "" : "s"
-      }`,
+    const duplicateIds = batch.ids.filter((id) =>
+      records.some((record) => record.source_id === id && record.policy_number_error)
+    );
+    if (duplicateIds.length) {
+      await processBatch(batch.kind.operation, duplicateIds, "invoiceButton", {
+        noun: duplicateIds.length + " duplicate polic" + (duplicateIds.length === 1 ? "y" : "ies"),
+        label: "Policy validation",
+        skipResolution: true,
+      });
+    }
+
+    const otherIds = hasSendable ? batch.ids.filter((id) =>
+      records.some((record) => record.source_id === id && !record.policy_number_error)
+    ) : [];
+    if (!otherIds.length) continue;
+    await processBatch(batch.kind.operation, otherIds, "invoiceButton", {
+      noun: otherIds.length + " " + batch.kind.label.toLowerCase()
+        + (otherIds.length === 1 ? "" : "s"),
       label: "Send Invoice",
       vendorChoices: batch.kind.key === "bill" ? vendorChoices : {},
     });
