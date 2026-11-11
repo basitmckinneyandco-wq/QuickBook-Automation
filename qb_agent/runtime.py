@@ -23,7 +23,7 @@ from .gsheets import (
     status_columns,
 )
 from .models import INVOICE_KINDS, Operation, WorkRecord
-from .processor import Processor
+from .processor import ProcessingResult, Processor
 from .quickbooks import (
     MAX_SHIP_VIA_NAME,
     DesktopQuickBooksGateway,
@@ -148,10 +148,12 @@ class Runtime:
         # tab label -> {policy key: real sheet row}, built only when the rows
         # come from the published link and so carry no true row number.
         self._row_index: dict[str, dict[tuple[str, str, str], tuple[int, dict[str, str]]]] = {}
-        # Keys seen more than once in a tab cannot safely be used to update
-        # the sheet. LOB is deliberately not a row-identity tie-breaker.
+        # Repeated customer/policy/date keys are not resolved by LOB. Keep all
+        # real row numbers so a review status can be written to every duplicate.
         self._ambiguous_sheet_rows: dict[str, set[tuple[str, str, str]]] = {}
-        self._ambiguous_sheet_errors: dict[str, str] = {}
+        self._ambiguous_sheet_locations: dict[
+            str, dict[tuple[str, str, str], list[tuple[int, dict[str, str]]]]
+        ] = {}
         self._lookup_at = 0.0
         # (policy, status column) -> when this machine last finished writing
         # that cell. A read of the sheet that began before then may have been
@@ -240,9 +242,12 @@ class Runtime:
         states = self.store.states_for(list(self.records), self.config.mode)
         invoices = self.store.invoice_states(list(self.records), self.config.mode)
         edits = self.store.overrides()  # read once, not per row
+        duplicate_errors = self._duplicate_policy_errors()
         payload: list[dict[str, object]] = []
         for record in self.records.values():
             item = record.to_dict()
+            if record.source_id in duplicate_errors:
+                item["policy_number_error"] = duplicate_errors[record.source_id]
             item["transaction_type"] = self._shown_transaction_type(record)
             state = states.get(record.source_id)
             if _is_obsolete_name_limit_review(state):
@@ -253,6 +258,40 @@ class Runtime:
             item["edited"] = sorted(edits.get(record.source_id, {}))
             payload.append(item)
         return payload
+
+    def _duplicate_policy_errors(self) -> dict[str, str]:
+        """Find repeated policy numbers for one customer and effective date.
+
+        LOB is included in the explanation only. It never makes a duplicate
+        policy number valid or selects one row over another.
+        """
+        groups: dict[tuple[str, str, str], list[WorkRecord]] = {}
+        for record in self.records.values():
+            key = _duplicate_policy_key(record)
+            if not key[0] or not key[1]:
+                continue
+            groups.setdefault(key, []).append(record)
+
+        errors: dict[str, str] = {}
+        for rows in groups.values():
+            if len(rows) < 2:
+                continue
+            first = rows[0]
+            effective_date = first.invoice_date.isoformat() if first.invoice_date else "(blank)"
+            lobs = sorted({row.job_name.strip() for row in rows if row.job_name.strip()})
+            lob_text = f" Line of Business entries: {', '.join(lobs)}." if lobs else ""
+            message = (
+                f"Duplicate policy number '{first.invoice_number}' for customer "
+                f"'{first.customer_name}' and effective date '{effective_date}'. "
+                f"That policy number is repeated across multiple rows.{lob_text} "
+                "Policy numbers must be unique for the same customer and effective date. "
+                "Correct the policy number in Google Sheets, then refresh; invoice and bill "
+                "creation is blocked for these rows. LOB is shown for context only and is not "
+                "used to choose a row."
+            )
+            for row in rows:
+                errors[row.source_id] = message
+        return errors
 
     def _state_payload(
         self, record: WorkRecord, state, invoices: dict[str, object] | None = None
@@ -786,6 +825,9 @@ class Runtime:
 
     def _record_payload(self, record: WorkRecord) -> dict[str, object]:
         item = record.to_dict()
+        duplicate_error = self._duplicate_policy_errors().get(record.source_id)
+        if duplicate_error:
+            item["policy_number_error"] = duplicate_error
         item["transaction_type"] = self._shown_transaction_type(record)
         state = self.store.get(record.source_id, self.config.mode)
         if _is_obsolete_name_limit_review(state):
@@ -912,6 +954,30 @@ class Runtime:
             if not selected:
                 return unknown
 
+            duplicate_errors = self._duplicate_policy_errors()
+            transaction_operation = operation in {
+                Operation.CREATE_INVOICE,
+                Operation.PREMIUM_INVOICE,
+                Operation.COMMISSION_INVOICE,
+                Operation.FEES_INVOICE,
+                Operation.CREATE_BILL,
+            }
+            blocked: dict[str, ProcessingResult] = {}
+            work: list[WorkRecord] = []
+            for record in selected:
+                error = duplicate_errors.get(record.source_id) if transaction_operation else None
+                if not error:
+                    work.append(record)
+                    continue
+                blocked[record.source_id] = ProcessingResult(
+                    source_id=record.source_id,
+                    label=record.quickbooks_job_name,
+                    status="needs_review",
+                    message=error,
+                    dry_run=self.processor.dry_run,
+                    operation=operation.value,
+                )
+
             queue = [record.source_id for record in selected]
             finished: list[dict[str, object]] = []
             self._progress = {
@@ -942,16 +1008,31 @@ class Runtime:
                 self._progress["current"] = queue[0] if queue else None
 
             try:
-                results = [
-                    result.to_dict()
-                    for result in self.processor.process_many(
-                        selected, operation, report, vendor_choices or {}
+                for result in blocked.values():
+                    report(result)
+                processed = (
+                    self.processor.process_many(
+                        work, operation, report, vendor_choices or {}
                     )
+                    if work else []
+                )
+                processed_by_id = {result.source_id: result for result in processed}
+                results = [
+                    (blocked.get(record.source_id) or processed_by_id[record.source_id]).to_dict()
+                    for record in selected
                 ]
             finally:
                 self._progress = {"active": False}
         finally:
             self._lock.release()
+
+        # A duplicate warning must mark the sheet's current real rows, not a
+        # cached row map from before somebody added the second LOB entry.
+        if transaction_operation and any(
+            result.get("source_id") in duplicate_errors
+            for result in results
+        ):
+            self._lookup_at = 0.0
 
         # Outside the lock: writing to the sheet is network work, and must not
         # hold up an edit or the next send. A sheet that cannot be written is
@@ -1675,22 +1756,37 @@ class Runtime:
         if not (settings.enabled and settings.write_status and results):
             return
         updates: list[tuple[str, str]] = []
+        included_cells: set[str] = set()
         touched: list[tuple[str, str, str]] = []     # (policy, column, word before)
         for item in results:
             source_id = str(item.get("source_id", ""))
             operation = str(item.get("operation", ""))
-            cell = self._status_cell(source_id, operation)
+            cells = self._status_cells(source_id, operation)
             word = self._STATUS_WORD.get(str(item.get("status", "")))
-            if cell and word:
-                updates.append((cell, word))
+            if cells and word:
+                for cell in cells:
+                    if cell not in included_cells:
+                        updates.append((cell, word))
+                        included_cells.add(cell)
                 # The row in memory still holds what the sheet said when it was
                 # last read. Left stale, the next sync would read that old word
                 # back and write it over the one being sent now - undoing the
                 # result of the very send that produced it.
                 column = self._STATUS_FIELD.get(operation, "")
                 if column:
-                    touched.append((source_id, column, self._held(source_id, column)))
-                    self._remember(source_id, column, word)
+                    record = self.records.get(source_id)
+                    related = [record] if record is not None else []
+                    if len(cells) > 1 and record is not None:
+                        label = self._tab_label(record.source_tab)
+                        key = _policy_key(record)
+                        related = [
+                            candidate for candidate in self.records.values()
+                            if self._tab_label(candidate.source_tab) == label
+                            and _duplicate_policy_key(candidate) == _duplicate_policy_key(record)
+                        ]
+                    for target in related:
+                        touched.append((target.source_id, column, self._held(target.source_id, column)))
+                        self._remember(target.source_id, column, word)
         if not updates:
             return
         try:
@@ -1826,6 +1922,46 @@ class Runtime:
             return ""
         return f"'{title}'!{column_letter(columns[column])}{row}"
 
+    def _status_cells(self, source_id: str, operation: str) -> list[str]:
+        """Return every matching sheet status cell; never pick by LOB."""
+        record = self.records.get(source_id)
+        field = self._STATUS_FIELD.get(operation)
+        if record is None or not field:
+            return []
+        label = self._tab_label(record.source_tab)
+        duplicate_error = self._duplicate_policy_errors().get(record.source_id)
+        if self.config.google_sheet.read_rows:
+            if duplicate_error:
+                self._row_lookup(label)
+                related = [
+                    candidate for candidate in self.records.values()
+                    if self._tab_label(candidate.source_tab) == label
+                    and _duplicate_policy_key(candidate) == _duplicate_policy_key(record)
+                ]
+                return list(dict.fromkeys(
+                    cell for candidate in related
+                    if (cell := self._cell_for(candidate, field))
+                ))
+            cell = self._cell_for(record, field)
+            return [cell] if cell else []
+
+        key = _policy_key(record)
+        # Ensure the complete raw tab has been indexed before trusting its row numbers.
+        self._row_lookup(label)
+        matches = self._ambiguous_sheet_locations.get(label, {}).get(key, [])
+        if matches:
+            index = self._status_columns.get(label, {}).get(field)
+            title = self.config.google_sheet.tab_titles.get(label, "")
+            if index is None or not title:
+                return []
+            return list(dict.fromkeys(
+                f"'{title}'!{column_letter(index)}{row}"
+                for row, _ in matches
+            ))
+
+        cell = self._cell_for(record, field)
+        return [cell] if cell else []
+
     def _status_cell(self, source_id: str, operation: str) -> str:
         """The A1 address of one row's status column, or "" if it cannot be found."""
         record = self.records.get(source_id)
@@ -1878,8 +2014,6 @@ class Runtime:
         found = self._row_lookup(label).get(key)
         if found:
             return found[0]
-        if key in self._ambiguous_sheet_rows.get(label, set()):
-            self.sheet_write_error = self._sheet_row_error(record)
         return 0
 
     def _sheet_row_error(self, record: WorkRecord) -> str:
@@ -1895,8 +2029,7 @@ class Runtime:
                 f"Duplicate policy row: customer '{record.customer_name}', policy "
                 f"'{record.invoice_number}', and effective date '{effective_date}' "
                 "identify more than one row in Google Sheets. LOB is not used to "
-                "choose a row. Correct the duplicate policy/effective-date entry; "
-                "no sheet update was made."
+                "choose one. Correct the duplicate policy/effective-date entry."
             )
         return f"The row for '{record.customer_name}' could not be identified in the sheet."
 
@@ -2065,43 +2198,36 @@ class Runtime:
     def _row_lookup(
         self, label: str, force: bool = False
     ) -> dict[tuple[str, str, str], tuple[int, dict[str, str]]]:
-        """Policy -> (real sheet row, its four statuses), for one tab.
-
-        One read of the tab answers both questions, so the statuses come along
-        for free with the row numbers.
-        """
+        """Unique policy keys and all real row locations for duplicate keys."""
         fresh = (monotonic() - self._lookup_at) < LOOKUP_SECONDS
         if not force and fresh and label in self._row_index:
-            self._restore_duplicate_sheet_error()
             return self._row_index[label]
         title = self.config.google_sheet.tab_titles.get(label, "")
         if not title:
             self._ambiguous_sheet_rows[label] = set()
-            self._ambiguous_sheet_errors.pop(label, None)
-            self._restore_duplicate_sheet_error()
+            self._ambiguous_sheet_locations[label] = {}
             return {}
         try:
             grid = self._sheets().read(title)
         except SheetsError as exc:
             self._ambiguous_sheet_rows[label] = set()
-            self._ambiguous_sheet_errors.pop(label, None)
-            self._restore_duplicate_sheet_error()
+            self._ambiguous_sheet_locations[label] = {}
             self.sheet_write_error = str(exc)
             return {}
         self._status_columns[label] = sheet_columns(grid, tab=label)
         try:
-            # Every row, ready or not: this index is how a policy is found in
-            # the sheet, and the published link's idea of which rows are
-            # workable need not match ours. A row it sends that we would have
-            # filtered out still has to be findable, or its status can never
-            # be read or written.
+            # Read every row, including ones not ready for invoicing, because
+            # the published feed is filtered and has no trustworthy row number.
             found = build_records(label, grid, every_row=True)
         except WebSourceError:
             self._ambiguous_sheet_rows[label] = set()
-            self._ambiguous_sheet_errors.pop(label, None)
-            self._restore_duplicate_sheet_error()
+            self._ambiguous_sheet_locations[label] = {}
             return {}
+
         seen: dict[tuple[str, str, str], tuple[int, dict[str, str]]] = {}
+        locations: dict[
+            tuple[str, str, str], list[tuple[int, dict[str, str]]]
+        ] = {}
         ambiguous: set[tuple[str, str, str]] = set()
         for entry in found.records:
             key = _policy_key(entry)
@@ -2116,25 +2242,16 @@ class Runtime:
                 },
             )
             seen[key] = location
+            locations.setdefault(key, []).append(location)
         for key in ambiguous:
-            seen.pop(key, None)      # refuse every duplicate customer/policy/date key
+            seen.pop(key, None)  # do not choose one row for a duplicate key
         self._row_index[label] = seen
         self._ambiguous_sheet_rows[label] = ambiguous
-        if ambiguous:
-            duplicate = next(entry for entry in found.records if _policy_key(entry) in ambiguous)
-            self._ambiguous_sheet_errors[label] = self._sheet_row_error(duplicate)
-        else:
-            self._ambiguous_sheet_errors.pop(label, None)
-        self._restore_duplicate_sheet_error()
+        self._ambiguous_sheet_locations[label] = {
+            key: locations[key] for key in ambiguous
+        }
         self._lookup_at = monotonic()
         return seen
-
-    def _restore_duplicate_sheet_error(self) -> None:
-        error = next(iter(self._ambiguous_sheet_errors.values()), "")
-        if error:
-            self.sheet_write_error = error
-        elif self.sheet_write_error.startswith("Duplicate policy row:"):
-            self.sheet_write_error = ""
 
     def _take_lock(self, seconds: float) -> None:
         """Wait a while for the app to be free, then explain who is holding it.
@@ -2385,6 +2502,15 @@ def _policy_key(record: WorkRecord) -> tuple[str, str, str]:
     return (
         record.customer_name.strip().casefold(),
         record.invoice_number.strip().casefold(),
+        record.invoice_date.isoformat() if record.invoice_date else "",
+    )
+
+
+def _duplicate_policy_key(record: WorkRecord) -> tuple[str, str, str]:
+    """Policy identity for duplicate validation, separate from QuickBooks matching."""
+    return (
+        " ".join(record.customer_name.casefold().split()),
+        _policy_number_key(record.invoice_number),
         record.invoice_date.isoformat() if record.invoice_date else "",
     )
 
