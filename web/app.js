@@ -3666,12 +3666,16 @@ function chooseQuickBooksCustomers(rows) {
     radio.dataset.sourceId = row.source_id;
     radio.dataset.action = "create";
     const createText = div("customer-option-name");
+    const createName = div("customer-create-name", nameEdit.value || row.customer_name || "");
     createText.append(
       div("customer-create-label", "Create a new customer"),
-      div("customer-create-name", row.customer_name || "")
+      createName
     );
     create.append(radio, createText);
     options.append(create);
+    nameEdit.addEventListener("input", () => {
+      createName.textContent = nameEdit.value || row.customer_name || "";
+    });
 
     card.append(head, options);
     return card;

@@ -1402,12 +1402,12 @@ class Runtime:
                 record = self.records.get(source_id)
                 if record is None:
                     raise ValueError("One selected policy is no longer loaded. Refresh and try again.")
-                edited_name = str(choice.get("customer_name", "")).strip()
-                if edited_name and edited_name != record.customer_name:
-                    record = apply(record, "customer_name", edited_name)
-                    self.records[source_id] = record
-                    self.store.set_override(source_id, "customer_name", edited_name)
                 if action == "create":
+                    edited_name = str(choice.get("customer_name", "")).strip()
+                    if edited_name and edited_name != record.customer_name:
+                        record = apply(record, "customer_name", edited_name)
+                        self.records[source_id] = record
+                        self.store.set_override(source_id, "customer_name", edited_name)
                     verified.append((record, "", "", "create"))
                     continue
                 list_id = str(choice.get("list_id", "")).strip()
