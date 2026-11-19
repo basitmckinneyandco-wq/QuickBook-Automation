@@ -239,7 +239,13 @@ class WorkRecord:
 
     @property
     def premium_class(self) -> str:
-        return self._extra("policy_class")
+        value = self._extra("policy_class").strip()
+        # The sheet uses the singular label, while the QuickBooks Class List
+        # uses the plural FullName. Keep the sheet value intact and send the
+        # exact QuickBooks name for both premium and commission invoices.
+        return {
+            "recurring payment": "Recurring Payments",
+        }.get(value.casefold(), value)
 
     @property
     def premium_description(self) -> str:

@@ -117,6 +117,7 @@ class Runtime:
         self.load_error = ""
         # Why the last attempt to write a status into the sheet failed, if it did.
         self.sheet_write_error = ""
+        self.sheet_write_issues: list[dict[str, object]] = []
         self._cache: dict[str, list[list[object]]] | None = None
         self._cached_at = 0.0
         # How long the feed last took to answer, so the watcher can pace itself
@@ -153,6 +154,9 @@ class Runtime:
         self._ambiguous_sheet_rows: dict[str, set[tuple[str, str, str]]] = {}
         self._ambiguous_sheet_locations: dict[
             str, dict[tuple[str, str, str], list[tuple[int, dict[str, str]]]]
+        ] = {}
+        self._policy_date_locations: dict[
+            str, dict[tuple[str, str], list[tuple[int, dict[str, str]]]]
         ] = {}
         self._lookup_at = 0.0
         # (policy, status column) -> when this machine last finished writing
@@ -229,6 +233,7 @@ class Runtime:
             # is how a machine ends up creating things in QuickBooks while
             # nobody else ever hears about it.
             "sheet_write_error": self.sheet_write_error,
+            "sheet_write_issues": list(self.sheet_write_issues),
             "sheet_enabled": self.config.google_sheet.enabled,
             # Both kinds of business always, then anything else the feed had.
             # Built from what arrived, the list lost New Business whenever
@@ -1397,6 +1402,11 @@ class Runtime:
                 record = self.records.get(source_id)
                 if record is None:
                     raise ValueError("One selected policy is no longer loaded. Refresh and try again.")
+                edited_name = str(choice.get("customer_name", "")).strip()
+                if edited_name and edited_name != record.customer_name:
+                    record = apply(record, "customer_name", edited_name)
+                    self.records[source_id] = record
+                    self.store.set_override(source_id, "customer_name", edited_name)
                 if action == "create":
                     verified.append((record, "", "", "create"))
                     continue
@@ -1559,6 +1569,7 @@ class Runtime:
         updates: list[tuple[str, str]] = []
         noted: list[tuple[str, str, str]] = []
         unplaced = 0
+        unplaced_rows: list[dict[str, object]] = []
         for record in rows:
             state = states.get(record.source_id)
             if _is_obsolete_name_limit_review(state):
@@ -1609,6 +1620,15 @@ class Runtime:
                     # rather than passed over in silence: the person would
                     # otherwise watch a status never appear and have no idea why.
                     unplaced += 1
+                    unplaced_rows.append({
+                        "source_id": record.source_id,
+                        "tab": record.source_tab,
+                        "corporation": record.customer_name,
+                        "policy_number": record.invoice_number,
+                        "effective_date": record.invoice_date.isoformat() if record.invoice_date else "",
+                        "status_column": column,
+                        "reason": self._sheet_row_error(record),
+                    })
                     continue
                 updates.append((cell, word))
                 noted.append((record.source_id, column, word))
@@ -1637,12 +1657,18 @@ class Runtime:
             # Nothing is noted as written, so memory keeps matching the sheet
             # and a later read cannot mistake the old word for a fresh edit.
             self.sheet_write_error = str(exc)
-            return {"written": written, "error": str(exc)}
+            self.sheet_write_issues = unplaced_rows
+            return {"written": written, "error": str(exc), "unplaced_rows": unplaced_rows}
         for source_id, column, word in noted:
             self._remember(source_id, column, word)
         self._wrote((source_id, column) for source_id, column, _ in noted)
-        self.sheet_write_error = ""
-        return {"written": written, "rows": len(rows), "unplaced": unplaced}
+        self.sheet_write_issues = unplaced_rows
+        self.sheet_write_error = (
+            f"{unplaced} status(es) could not be written: their row in the sheet "
+            "could not be identified."
+            if unplaced else ""
+        )
+        return {"written": written, "rows": len(rows), "unplaced": unplaced, "unplaced_rows": unplaced_rows}
 
     # What each status column should say about a row when nothing has been
     # done to it yet - worked out from the row itself, with no history.
@@ -1758,11 +1784,24 @@ class Runtime:
         updates: list[tuple[str, str]] = []
         included_cells: set[str] = set()
         touched: list[tuple[str, str, str]] = []     # (policy, column, word before)
+        missing_rows: list[dict[str, object]] = []
         for item in results:
             source_id = str(item.get("source_id", ""))
             operation = str(item.get("operation", ""))
             cells = self._status_cells(source_id, operation)
             word = self._STATUS_WORD.get(str(item.get("status", "")))
+            if word and not cells:
+                record = self.records.get(source_id)
+                if record is not None:
+                    missing_rows.append({
+                        "source_id": source_id,
+                        "tab": record.source_tab,
+                        "corporation": record.customer_name,
+                        "policy_number": record.invoice_number,
+                        "effective_date": record.invoice_date.isoformat() if record.invoice_date else "",
+                        "status_column": self._STATUS_FIELD.get(operation, ""),
+                        "reason": self._sheet_row_error(record),
+                    })
             if cells and word:
                 for cell in cells:
                     if cell not in included_cells:
@@ -1788,6 +1827,12 @@ class Runtime:
                         touched.append((target.source_id, column, self._held(target.source_id, column)))
                         self._remember(target.source_id, column, word)
         if not updates:
+            if missing_rows:
+                self.sheet_write_issues = missing_rows
+                self.sheet_write_error = (
+                    f"{len(missing_rows)} status(es) could not be written: their row "
+                    "in the sheet could not be identified."
+                )
             return
         try:
             self._sheets().write(updates)
@@ -1799,7 +1844,12 @@ class Runtime:
             for source_id, column, before in touched:
                 self._remember(source_id, column, before)
         else:
-            self.sheet_write_error = ""
+            self.sheet_write_issues = missing_rows
+            self.sheet_write_error = (
+                f"{len(missing_rows)} status(es) could not be written: their row "
+                "in the sheet could not be identified."
+                if missing_rows else ""
+            )
             self._wrote((source_id, column) for source_id, column, _ in touched)
 
     # What a finished send tells the sheet about where the row ended up.
@@ -1959,6 +2009,17 @@ class Runtime:
                 for row, _ in matches
             ))
 
+        date_key = (
+            _policy_number_key(record.invoice_number),
+            record.invoice_date.isoformat() if record.invoice_date else "",
+        )
+        fallback = self._policy_date_locations.get(label, {}).get(date_key, [])
+        if len(fallback) == 1:
+            index = self._status_columns.get(label, {}).get(field)
+            title = self.config.google_sheet.tab_titles.get(label, "")
+            if index is not None and title:
+                return [f"'{title}'!{column_letter(index)}{fallback[0][0]}"]
+
         cell = self._cell_for(record, field)
         return [cell] if cell else []
 
@@ -2014,6 +2075,13 @@ class Runtime:
         found = self._row_lookup(label).get(key)
         if found:
             return found[0]
+        date_key = (
+            _policy_number_key(record.invoice_number),
+            record.invoice_date.isoformat() if record.invoice_date else "",
+        )
+        fallback = self._policy_date_locations.get(label, {}).get(date_key, [])
+        if len(fallback) == 1:
+            return fallback[0][0]
         return 0
 
     def _sheet_row_error(self, record: WorkRecord) -> str:
@@ -2206,12 +2274,14 @@ class Runtime:
         if not title:
             self._ambiguous_sheet_rows[label] = set()
             self._ambiguous_sheet_locations[label] = {}
+            self._policy_date_locations[label] = {}
             return {}
         try:
             grid = self._sheets().read(title)
         except SheetsError as exc:
             self._ambiguous_sheet_rows[label] = set()
             self._ambiguous_sheet_locations[label] = {}
+            self._policy_date_locations[label] = {}
             self.sheet_write_error = str(exc)
             return {}
         self._status_columns[label] = sheet_columns(grid, tab=label)
@@ -2222,12 +2292,14 @@ class Runtime:
         except WebSourceError:
             self._ambiguous_sheet_rows[label] = set()
             self._ambiguous_sheet_locations[label] = {}
+            self._policy_date_locations[label] = {}
             return {}
 
         seen: dict[tuple[str, str, str], tuple[int, dict[str, str]]] = {}
         locations: dict[
             tuple[str, str, str], list[tuple[int, dict[str, str]]]
         ] = {}
+        policy_dates: dict[tuple[str, str], list[tuple[int, dict[str, str]]]] = {}
         ambiguous: set[tuple[str, str, str]] = set()
         for entry in found.records:
             key = _policy_key(entry)
@@ -2243,6 +2315,12 @@ class Runtime:
             )
             seen[key] = location
             locations.setdefault(key, []).append(location)
+            date_key = (
+                _policy_number_key(entry.invoice_number),
+                entry.invoice_date.isoformat() if entry.invoice_date else "",
+            )
+            if date_key[0]:
+                policy_dates.setdefault(date_key, []).append(location)
         for key in ambiguous:
             seen.pop(key, None)  # do not choose one row for a duplicate key
         self._row_index[label] = seen
@@ -2250,6 +2328,7 @@ class Runtime:
         self._ambiguous_sheet_locations[label] = {
             key: locations[key] for key in ambiguous
         }
+        self._policy_date_locations[label] = policy_dates
         self._lookup_at = monotonic()
         return seen
 

@@ -2632,6 +2632,32 @@ function renderStatus() {
   const note = $("sourceNote");
   note.hidden = !trouble.length;
   note.textContent = trouble.join("  ");
+  const issues = $("sourceIssues");
+  const rowsWithIssues = health.sheet_write_issues || [];
+  issues.hidden = !rowsWithIssues.length;
+  issues.replaceChildren();
+  if (rowsWithIssues.length) {
+    const heading = document.createElement("strong");
+    heading.textContent = "Rows needing attention (" + rowsWithIssues.length + ")";
+    issues.append(heading);
+    const hint = document.createElement("p");
+    hint.textContent = "These statuses could not be matched to a unique Google Sheet row. Correct the row data, then refresh.";
+    issues.append(hint);
+    const list = document.createElement("ul");
+    for (const item of rowsWithIssues) {
+      const entry = document.createElement("li");
+      entry.textContent = [
+        item.tab,
+        item.corporation,
+        item.policy_number && "Policy " + item.policy_number,
+        item.effective_date && "Effective " + item.effective_date,
+        item.status_column && "Column " + item.status_column,
+      ].filter(Boolean).join(" · ");
+      entry.title = item.reason || "";
+      list.append(entry);
+    }
+    issues.append(list);
+  }
 
   $("unlockPanel").hidden = Boolean(health.writes_enabled);
 }
@@ -3588,11 +3614,19 @@ function chooseQuickBooksCustomers(rows) {
     const naming = div("customer-naming");
     const title = document.createElement("strong");
     title.textContent = row.customer_name || "Unnamed customer";
+    const nameEdit = document.createElement("input");
+    nameEdit.className = "customer-name-edit";
+    nameEdit.type = "text";
+    nameEdit.value = row.customer_name || "";
+    nameEdit.placeholder = "Edit customer / opportunity name";
+    nameEdit.dataset.sourceId = row.source_id;
+    nameEdit.setAttribute("aria-label", "Edit customer or opportunity name");
+    nameEdit.title = "Edit this customer/opportunity name before continuing";
     const facts = div("customer-facts");
     for (const fact of [row.policy_number && `Policy ${row.policy_number}`, row.job_name]) {
       if (fact) facts.append(div("customer-chip", fact));
     }
-    naming.append(title, facts);
+    naming.append(title, nameEdit, facts);
     head.append(naming);
 
     const options = div("customer-options");
@@ -3649,7 +3683,7 @@ function chooseQuickBooksCustomers(rows) {
     $("customerProgressBar").style.width = `${(picked / rows.length) * 100}%`;
     $("customerProgress").classList.toggle("complete", picked === rows.length);
     $("customerNote").textContent = picked === rows.length
-      ? "Choices will be saved back to Google Sheets."
+      ? "Choices will be saved; edited names stay on this dashboard and are used for QuickBooks."
       : `${rows.length - picked} of ${rows.length} still to choose.`;
     // Settling a card should visibly settle it, or a long list gives no sense
     // of progress at all.
@@ -3687,6 +3721,8 @@ function chooseQuickBooksCustomers(rows) {
                 source_id: radio.dataset.sourceId,
                 action: radio.dataset.action,
                 list_id: radio.value,
+                customer_name: [...choices.querySelectorAll(".customer-name-edit")]
+                  .find((input) => input.dataset.sourceId === radio.dataset.sourceId)?.value || "",
               })),
             }),
           },

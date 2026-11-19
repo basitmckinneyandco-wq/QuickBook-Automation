@@ -19,7 +19,6 @@ from .gsheets import Sheets
 
 LOG_TAB = "QuickBook Logs"
 HEADERS = ("Pakistan Time", "Company", "Computer", "Windows user", "Policy Number", "Activity", "Details")
-MAX_ROWS = 1000
 
 
 class ActivityLog:
@@ -147,13 +146,12 @@ class ActivityLog:
                 "failures": sum(bool(re.search(r"fail|error", str(row.get("Activity", "")), re.I)) for row in rows),
                 "total": len(rows),
             }
-            rows = rows[-MAX_ROWS:]
             rows.reverse()
             return {
                 "enabled": True,
                 "rows": rows,
                 "summary": summary,
-                "message": self._last_error or f"Refreshes every 5 seconds · latest {MAX_ROWS} events shown; all entries remain in the sheet.",
+                "message": self._last_error or "Refreshes every 5 seconds · all shared log events shown.",
             }
         except Exception as exc:
             return {

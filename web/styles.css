@@ -1335,6 +1335,15 @@ td[data-key="__invoice"] .tag { display: block; margin-bottom: 3px; text-align: 
 .customer-row-head strong {
   display: block; font-size: 14px; line-height: 1.3; letter-spacing: -.01em;
 }
+.customer-name-edit {
+  display: block; width: min(100%, 430px); margin-top: 7px;
+  padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); color: var(--text); font: inherit; font-size: 12px;
+}
+.customer-name-edit:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
 .customer-facts { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
 .customer-chip {
   font-size: 10.5px; color: var(--muted); padding: 3px 8px; border-radius: 999px;
@@ -1602,6 +1611,14 @@ td[data-key="__invoice"] .tag { display: block; margin-bottom: 3px; text-align: 
 /* ═══ activity ═══════════════════════════════════════════════════════════ */
 
 .activity { display: flex; flex-direction: column; }
+.sheet-issues {
+  margin: 12px 0; padding: 12px 14px; border: 1px solid var(--warn);
+  border-radius: var(--r-sm); background: var(--warn-tint); color: var(--text);
+  font-size: 12px;
+}
+.sheet-issues p { margin: 4px 0 7px; color: var(--muted); }
+.sheet-issues ul { margin: 0; padding-left: 20px; max-height: 220px; overflow-y: auto; }
+.sheet-issues li { margin: 3px 0; }
 /* Entries must keep their own height: as flex children they would otherwise
    shrink to fit the capped container and collapse into each other, instead of
    the list scrolling. */
