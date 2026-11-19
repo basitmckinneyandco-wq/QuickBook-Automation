@@ -1486,7 +1486,7 @@ class Runtime:
             if record is not None:
                 self.store.save(
                     record,
-                    self.mode,
+                    self.config.mode,
                     status="needs_review",
                     message=item["message"],
                     error_message=item["message"],
