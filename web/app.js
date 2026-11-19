@@ -3733,12 +3733,20 @@ function chooseQuickBooksCustomers(rows) {
           SEND_TIMEOUT_MS
         );
         state.records = payload.records || state.records;
-        if (!payload.sheet_saved) {
+        const mappingErrors = Array.isArray(payload.errors) ? payload.errors : [];
+        if (mappingErrors.length) {
+          const summary = mappingErrors
+            .map((item) => item.policy_number ? `${item.policy_number}: ${item.message}` : item.message)
+            .join(" | ");
+          toast(`Some customer choices need attention; the other rows can continue. ${summary}`, true);
+        }
+        const saved = payload.saved || [];
+        if (!payload.sheet_saved && !saved.length) {
           toast(`Customer choices were not saved to Google Sheets: ${payload.warning}`, true);
           continueButton.disabled = false;
           return;
         }
-        cleanup(payload.saved || []);
+        cleanup(saved);
       } catch (error) {
         toast(error.message, true);
         continueButton.disabled = false;

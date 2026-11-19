@@ -469,7 +469,24 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             if not isinstance(choice, dict):
                 raise ValueError("A customer choice is invalid.")
             cleaned.append({str(key): str(value) for key, value in choice.items()})
-        return self.server.runtime.save_customer_mappings(cleaned)
+        result = self.server.runtime.save_customer_mappings(cleaned)
+        company = self.server.runtime.config.company.display_name
+        for item in result.get("errors", []):
+            if not isinstance(item, dict):
+                continue
+            source_id = str(item.get("source_id", ""))
+            record = self.server.runtime.records.get(source_id)
+            shared_activity(
+                "Customer mapping failed",
+                str(item.get("message", "Could not save the customer choice.")),
+                company=company,
+                policy_number=(
+                    str(getattr(record, "invoice_number", "") or "")
+                    if record is not None
+                    else str(item.get("policy_number", "") or "")
+                ),
+            )
+        return result
 
     # --- plumbing ------------------------------------------------------------
 

@@ -489,10 +489,23 @@ class Processor:
                     rows_this_session = 0
                     while remaining:
                         record = remaining[0]
-                        result = self._process_one(
-                            gateway, record, operation,
-                            (vendor_choices or {}).get(record.source_id, ""),
-                        )
+                        try:
+                            result = self._process_one(
+                                gateway, record, operation,
+                                (vendor_choices or {}).get(record.source_id, ""),
+                            )
+                        except Exception as exc:
+                            # A malformed or unavailable individual row must
+                            # not discard the rest of a selected batch. The
+                            # row is saved as failed and the next one runs.
+                            message = f"Unexpected error: {exc}"
+                            result = self._save(
+                                record,
+                                "failed",
+                                message,
+                                error=message,
+                                operation=operation,
+                            )
                         if _is_session_error(result) and reopens < MAX_REOPENS:
                             reopens += 1
                             break  # drop the dead session, reopen, retry this row

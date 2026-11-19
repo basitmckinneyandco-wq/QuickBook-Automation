@@ -1395,13 +1395,19 @@ class Runtime:
 
         factory = self._read_gateway if self.config.mode == "quickbooks" else self._gateway
         verified: list[tuple[WorkRecord, str, str, str]] = []
+        errors: list[dict[str, str]] = []
         with factory() as gateway:
             for choice in choices:
                 source_id = str(choice.get("source_id", "")).strip()
                 action = str(choice.get("action", "")).strip().casefold()
                 record = self.records.get(source_id)
                 if record is None:
-                    raise ValueError("One selected policy is no longer loaded. Refresh and try again.")
+                    errors.append({
+                        "source_id": source_id,
+                        "policy_number": "",
+                        "message": "One selected policy is no longer loaded. Refresh and try again.",
+                    })
+                    continue
                 if action == "create":
                     edited_name = str(choice.get("customer_name", "")).strip()
                     if edited_name and edited_name != record.customer_name:
@@ -1413,7 +1419,12 @@ class Runtime:
                 list_id = str(choice.get("list_id", "")).strip()
                 selected = gateway.find_customer_by_id(list_id) if list_id else None
                 if selected is None or ":" in selected.full_name:
-                    raise ValueError(f"The chosen customer for '{record.customer_name}' was not found.")
+                    errors.append({
+                        "source_id": source_id,
+                        "policy_number": record.invoice_number,
+                        "message": f"The chosen customer for '{record.customer_name}' was not found.",
+                    })
+                    continue
                 saved_action = (
                     f"old_policy:{_policy_number_key(record.old_policy_number)}"
                     if action == "old_policy"
@@ -1424,8 +1435,9 @@ class Runtime:
         sheet_saved = True
         warning = ""
         updates: list[tuple[str, str]] = []
-        try:
-            for record, target, list_id, action in verified:
+        writable: list[tuple[WorkRecord, str, str, str]] = []
+        for record, target, list_id, action in verified:
+            try:
                 label = self._tab_label(record.source_tab)
                 columns = self._ensure_mapping_columns(label)
                 row = self._sheet_row(record)
@@ -1439,19 +1451,52 @@ class Runtime:
                 }
                 for field, value in values.items():
                     updates.append((f"'{title}'!{column_letter(columns[field])}{row}", value))
-            if updates:
+                writable.append((record, target, list_id, action))
+            except SheetsError as exc:
+                errors.append({
+                    "source_id": record.source_id,
+                    "policy_number": record.invoice_number,
+                    "message": str(exc),
+                })
+        if updates:
+            try:
                 self._sheets().write(updates)
-        except SheetsError as exc:
+            except SheetsError as exc:
+                # A failed bulk write affects only these otherwise-valid rows;
+                # keep their individual errors durable and leave them retryable.
+                warning = str(exc)
+                for record, *_ in writable:
+                    errors.append({
+                        "source_id": record.source_id,
+                        "policy_number": record.invoice_number,
+                        "message": warning,
+                    })
+                writable = []
+        if errors:
             sheet_saved = False
-            warning = str(exc)
+            warning = "; ".join(dict.fromkeys(item["message"] for item in errors))
             self.sheet_write_error = warning
         else:
             self.sheet_write_error = ""
 
+        # Persist mapping failures immediately so a short-lived toast cannot
+        # erase the reason a row was left for correction.
+        for item in errors:
+            record = self.records.get(item["source_id"])
+            if record is not None:
+                self.store.save(
+                    record,
+                    self.mode,
+                    status="needs_review",
+                    message=item["message"],
+                    error_message=item["message"],
+                    operation=Operation.CREATE_CUSTOMER.value,
+                )
+
         # Keep the current session usable even if Google is briefly unavailable.
         # The warning is returned prominently; nothing is pretended to be saved there.
         with self._lock:
-            for record, target, list_id, action in verified:
+            for record, target, list_id, action in writable:
                 current = self.records.get(record.source_id)
                 if current is None:
                     continue
@@ -1463,9 +1508,10 @@ class Runtime:
                 })
                 self.records[record.source_id] = replace(current, extra=tuple(extra.items()))
         return {
-            "saved": [record.source_id for record, *_ in verified],
+            "saved": [record.source_id for record, *_ in writable],
             "sheet_saved": sheet_saved,
             "warning": warning,
+            "errors": errors,
             "records": self.records_payload(),
         }
 
