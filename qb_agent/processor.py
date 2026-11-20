@@ -248,6 +248,11 @@ def _lob_word_matches(left: str, right: str) -> bool:
     short, long = sorted((left, right), key=len)
     if len(short) < 3 or len(short) >= len(long) or short[0] != long[0]:
         return False
+    # A longer suffix is usually a different name, not a typo or safe
+    # abbreviation. Without this guard, Bondii was treated as Bond simply
+    # because Bond was its prefix.
+    if long.startswith(short) and len(long) - len(short) > 1:
+        return False
     # QuickBooks users commonly omit vowels/letters: genl/general,
     # prpty/property, liab/liability. Requiring every abbreviation letter in
     # order is intentionally conservative; a row is reused only if the whole
@@ -804,6 +809,39 @@ class Processor:
             policy_date=record.invoice_date.isoformat() if record.invoice_date else "",
             parent_customer_list_id=parent_customer_list_id,
         )
+        if existing is not None and existing.customer_list_id != target.list_id:
+            # The lookup deliberately finds an invoice on an older job under
+            # the same customer. Before InvoiceMod is allowed to send a new
+            # CustomerRef, preserve that existing job when its LOB is
+            # equivalent to the current sheet value. A genuinely different
+            # LOB must get a separate invoice instead of moving the old one.
+            existing_job = (
+                gateway.find_customer_by_id(existing.customer_list_id)
+                if existing.customer_list_id else None
+            )
+            existing_lob = (
+                existing_job.full_name.rsplit(":", 1)[-1]
+                if existing_job is not None else ""
+            )
+            if existing_job is not None and _lob_names_match(
+                record.quickbooks_job_name, existing_lob
+            ):
+                steps.append(
+                    f"Existing invoice is already on equivalent QuickBooks job "
+                    f"'{existing_job.full_name}'; preserving that job."
+                )
+                target = existing_job
+            elif existing_job is not None:
+                steps.append(
+                    f"Existing invoice is on different QuickBooks job "
+                    f"'{existing_job.full_name}'; a separate invoice will be used."
+                )
+                existing = None
+            else:
+                raise QuickBooksError(
+                    "The existing invoice's QuickBooks job could not be verified; "
+                    "no invoice was moved or updated. Refresh and try again."
+                )
         if existing is not None:
             # Sending again is how an edited row is corrected, so the existing
             # invoice is brought up to date rather than left as it was.
@@ -855,7 +893,7 @@ class Processor:
     def _create_bill(
         self, gateway, record: WorkRecord, steps: list[str], selected_vendor_id: str = ""
     ) -> ProcessingResult:
-        """Create one carrier bill against the exact customer/job already chosen."""
+        """Create a carrier bill using QuickBooks' verified customer/job."""
         try:
             customer_id, job_id = self._bill_mapping_ids(record)
             year = record.invoice_date.year if record.invoice_date else 0
@@ -863,37 +901,70 @@ class Processor:
             if self.dry_run:
                 premium = None
             else:
-                customer = gateway.find_customer_by_id(customer_id)
-                job = gateway.find_customer_by_id(job_id)
-                if customer is None or job is None:
-                    raise QuickBooksError(
-                        "The saved QuickBooks customer/job could not be found. "
-                        "Choose the customer and job again before creating the bill."
+                customer = gateway.find_customer_by_id(customer_id) if customer_id else None
+                if customer is None:
+                    # The sheet mapping is shared memory, not the authority.
+                    # If its ID is stale, resolve the customer in QuickBooks
+                    # by the mapped/display name before looking for the
+                    # prerequisite premium invoice.
+                    customer = gateway.find_customer(
+                        record.mapped_customer_name or record.quickbooks_customer_name
                     )
-                if job.parent_list_id and job.parent_list_id != customer.list_id:
+                    if customer is not None:
+                        customer_id = customer.list_id
+                if customer is None:
                     raise QuickBooksError(
-                        "The saved job no longer belongs to the selected customer; "
-                        "the bill was not created."
+                        "The QuickBooks customer for this policy could not be found. "
+                        "Choose the customer again before creating the bill."
                     )
-                if not job.parent_list_id and not job.full_name.casefold().startswith(
+                job = gateway.find_customer_by_id(job_id) if job_id else None
+                if job is not None and job.parent_list_id and job.parent_list_id != customer.list_id:
+                    job = None
+                if job is not None and not job.parent_list_id and not job.full_name.casefold().startswith(
                     customer.full_name.casefold() + ":"
                 ):
-                    raise QuickBooksError(
-                        "The saved job does not belong to the selected customer; "
-                        "the bill was not created."
-                    )
+                    job = None
                 premium = gateway.find_policy_invoice(
                     record.quickbooks_invoice_number,
                     "premium",
-                    job_list_id=job_id,
+                    # Search by customer as the authority. A stale sheet job
+                    # must not prevent finding the existing premium invoice.
+                    job_list_id=job.list_id if job is not None else "",
                     policy_number=record.invoice_number,
                     policy_year=year,
+                    policy_date=record.invoice_date.isoformat() if record.invoice_date else "",
+                    parent_customer_list_id=customer.list_id,
                 )
-                if premium is None or premium.customer_list_id != job_id:
+                if premium is None or not premium.customer_list_id:
                     raise QuickBooksError(
-                        "The premium invoice for this policy was not found on the saved "
-                        "QuickBooks job. Create it first; no bill was created."
+                        "The premium invoice for this policy was not found in QuickBooks. "
+                        "Create it first; no bill was created."
                     )
+                premium_job = gateway.find_customer_by_id(premium.customer_list_id)
+                if premium_job is None:
+                    raise QuickBooksError(
+                        "The premium invoice points to a QuickBooks job that could not be "
+                        "opened; no bill was created."
+                    )
+                if premium_job.parent_list_id and premium_job.parent_list_id != customer.list_id:
+                    raise QuickBooksError(
+                        "The premium invoice belongs to a different QuickBooks customer; "
+                        "no bill was created."
+                    )
+                if not premium_job.parent_list_id and not premium_job.full_name.casefold().startswith(
+                    customer.full_name.casefold() + ":"
+                ):
+                    raise QuickBooksError(
+                        "The premium invoice is not on the selected QuickBooks customer; "
+                        "no bill was created."
+                    )
+                if job is None or job.list_id != premium_job.list_id:
+                    steps.append(
+                        f"Used the premium invoice's QuickBooks job '{premium_job.full_name}' "
+                        "because the saved sheet job mapping was stale."
+                    )
+                job = premium_job
+                job_id = job.list_id
                 steps.append(f"Premium invoice found on '{job.full_name}'.")
 
             vendor = gateway.resolve_bill_vendor(
@@ -990,19 +1061,19 @@ class Processor:
             )
 
     def _find_lob_job(self, gateway, customer, lob: str, known_list_id: str = ""):
-        """Find one existing job equivalent to the dashboard LOB, never by policy.
+        """Resolve a job from QuickBooks names, using a saved ID only safely.
 
-        A job this row has already been sent to is taken by its ID, which no
-        amount of renaming or re-spelling can disturb. Matching the line of
-        business by name is what is left when nothing was recorded, or when
-        the recorded job has since been deleted or moved to another customer.
+        QuickBooks is the source of truth. Exact and unambiguous equivalent
+        jobs win; a saved sheet ID is only a tie-breaker among those valid
+        candidates, never an override that can move an invoice to an
+        unrelated or merely stale job.
         """
-        if known_list_id:
-            known = gateway.find_customer_by_id(known_list_id)
-            if known is not None and known.full_name.startswith(f"{customer.full_name}:"):
-                return known, [known]
+        prefix = f"{customer.full_name}:"
+        known = gateway.find_customer_by_id(known_list_id) if known_list_id else None
+        if known is not None and not known.full_name.casefold().startswith(prefix.casefold()):
+            known = None
 
-        exact = gateway.find_customer(f"{customer.full_name}:{lob}")
+        exact = gateway.find_customer(f"{prefix}{lob}")
         if exact is not None:
             return exact, [exact]
 
@@ -1010,7 +1081,13 @@ class Processor:
             job for job in gateway.customer_jobs(customer)
             if _lob_names_match(lob, job.full_name.rsplit(":", 1)[-1])
         ]
-        return (matches[0] if len(matches) == 1 else None), matches
+        if len(matches) == 1:
+            return matches[0], matches
+        if len(matches) > 1 and known is not None:
+            for match in matches:
+                if match.list_id == known.list_id:
+                    return match, [match]
+        return (None, matches)
 
     def _sync_job(
         self, gateway, record: WorkRecord, customer, steps: list[str]
